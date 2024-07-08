@@ -2,8 +2,9 @@ use bevy::prelude::*;
 
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
-const BORDER_COLOR: Color = Color::rgb(1.0, 1.0, 0.0); // Yellow
-const TEXT_COLOR: Color = Color::rgb(1.0, 1.0, 0.0); // Yellow
+const BORDER_COLOR: Color = Color::YELLOW;
+const BACKGROUND_COLOR: Color = Color::BLACK;
+const TEXT_COLOR: Color = Color::YELLOW;
 
 fn main() {
     App::new()
@@ -15,6 +16,7 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(ClearColor(BACKGROUND_COLOR))
         .add_systems(Startup, setup)
         .add_systems(Update, (player_movement, update_score))
         .run();
@@ -31,28 +33,38 @@ struct GameState {
 }
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    // Camera
     commands.spawn(Camera2dBundle::default());
 
     // Outer border
     commands.spawn(SpriteBundle {
         sprite: Sprite {
             color: BORDER_COLOR,
-            custom_size: Some(Vec2::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            custom_size: Some(Vec2::new(WINDOW_WIDTH - 4.0, WINDOW_HEIGHT - 4.0)),
             ..default()
         },
         transform: Transform::from_xyz(0.0, 0.0, 0.0),
         ..default()
     });
 
-    // Inner border (score area)
+    // Inner border (gameplay area)
+    commands.spawn(SpriteBundle {
+        sprite: Sprite {
+            color: BACKGROUND_COLOR,
+            custom_size: Some(Vec2::new(WINDOW_WIDTH - 8.0, WINDOW_HEIGHT - 8.0)),
+            ..default()
+        },
+        transform: Transform::from_xyz(0.0, 0.0, 1.0),
+        ..default()
+    });
+
+    // Score area border
     commands.spawn(SpriteBundle {
         sprite: Sprite {
             color: BORDER_COLOR,
             custom_size: Some(Vec2::new(WINDOW_WIDTH * 0.8, WINDOW_HEIGHT * 0.2)),
             ..default()
         },
-        transform: Transform::from_xyz(0.0, WINDOW_HEIGHT * 0.3, 1.0),
+        transform: Transform::from_xyz(0.0, WINDOW_HEIGHT * 0.3, 2.0),
         ..default()
     });
 
@@ -100,7 +112,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 custom_size: Some(Vec2::new(20.0, 20.0)),
                 ..default()
             },
-            transform: Transform::from_xyz(WINDOW_WIDTH * 0.4, WINDOW_HEIGHT * 0.2, 2.0),
+            transform: Transform::from_xyz(WINDOW_WIDTH * 0.4, WINDOW_HEIGHT * 0.2, 3.0),
             ..default()
         },
         Player,
@@ -143,12 +155,12 @@ fn player_movement(
 
     // Clamp player position to game area
     player_transform.translation.x = player_transform.translation.x.clamp(
-        -WINDOW_WIDTH * 0.45,
-        WINDOW_WIDTH * 0.45,
+        -WINDOW_WIDTH * 0.45 + 10.0,
+        WINDOW_WIDTH * 0.45 - 10.0,
     );
     player_transform.translation.y = player_transform.translation.y.clamp(
-        -WINDOW_HEIGHT * 0.45,
-        WINDOW_HEIGHT * 0.15,
+        -WINDOW_HEIGHT * 0.45 + 10.0,
+        WINDOW_HEIGHT * 0.15 - 10.0,
     );
 }
 
