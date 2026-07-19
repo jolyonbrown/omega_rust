@@ -1,3 +1,4 @@
+mod audio;
 mod enemies;
 mod font;
 mod fx;
@@ -51,6 +52,7 @@ struct HeadlessOptions {
     frames: usize,
     shot_every: Option<usize>,
     output_directory: PathBuf,
+    dump_sfx_directory: Option<PathBuf>,
     seed: u64,
     script: Option<PathBuf>,
 }
@@ -66,6 +68,7 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
     let mut frames = None;
     let mut shot_every = None;
     let mut output_directory = PathBuf::from("verify/out");
+    let mut dump_sfx_directory = None;
     let mut seed = DEFAULT_SEED;
     let mut script = None;
 
@@ -88,6 +91,7 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
                 shot_every = Some(parse_positive_usize(value, "--shot-every")?);
             }
             "--out" => output_directory = PathBuf::from(value),
+            "--dump-sfx" => dump_sfx_directory = Some(PathBuf::from(value)),
             "--seed" => seed = parse_seed(value)?,
             "--script" => script = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown headless option: {option}")),
@@ -99,6 +103,7 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
         frames: frames.ok_or_else(|| "--frames N is required in headless mode".to_owned())?,
         shot_every,
         output_directory,
+        dump_sfx_directory,
         seed,
         script,
     })
@@ -128,6 +133,16 @@ fn parse_seed(value: &str) -> Result<u64, String> {
 }
 
 fn run_headless(options: HeadlessOptions) -> Result<(), String> {
+    if let Some(directory) = &options.dump_sfx_directory {
+        let bank = audio::SfxBank::generate();
+        bank.write_wavs(directory)
+            .map_err(|error| format!("could not dump SFX to {}: {error}", directory.display()))?;
+        println!("generated SFX:");
+        for (name, duration, peak) in bank.metrics() {
+            println!("  {name:<18} {duration:>5.3} s  {:>5.1}% FS", peak * 100.0);
+        }
+    }
+
     let script = match options.script {
         Some(path) => parse_script(&path)?,
         None => Vec::new(),
@@ -140,8 +155,15 @@ fn run_headless(options: HeadlessOptions) -> Result<(), String> {
     })?;
 
     let mut simulation = Simulation::new(options.seed);
+    let mut muted = false;
+    let mut previous_mute = false;
     for frame in 0..options.frames {
-        simulation.tick(script_input(&script, frame));
+        let input = script_input(&script, frame);
+        if input.mute && !previous_mute {
+            muted = !muted;
+        }
+        previous_mute = input.mute;
+        simulation.tick(input);
         let capture = match options.shot_every {
             Some(interval) => frame % interval == 0 || frame + 1 == options.frames,
             None => frame + 1 == options.frames,
@@ -150,7 +172,11 @@ fn run_headless(options: HeadlessOptions) -> Result<(), String> {
             let path = options
                 .output_directory
                 .join(format!("frame_{frame:05}.png"));
-            headless::write_png(&simulation.display_list(), &path)
+            let mut display_list = simulation.display_list();
+            if muted {
+                append_muted_indicator(&mut display_list);
+            }
+            headless::write_png(&display_list, &path)
                 .map_err(|error| format!("could not write {}: {error}", path.display()))?;
         }
     }
@@ -203,6 +229,7 @@ fn parse_script(path: &Path) -> Result<Vec<ScriptRange>, String> {
                 "fire" => input.fire = true,
                 "start" => input.start = true,
                 "pause" => input.pause = true,
+                "mute" => input.mute = true,
                 "escape" => input.escape = true,
                 _ => {
                     return Err(format!(
@@ -243,9 +270,14 @@ async fn windowed_main() {
     use macroquad::prelude::{get_frame_time, is_key_down, next_frame, KeyCode};
 
     let mut simulation = Simulation::persistent(DEFAULT_SEED);
+    let generated_sfx = audio::SfxBank::generate();
+    let mut audio_player = audio::AudioPlayer::load(&generated_sfx)
+        .await
+        .unwrap_or_else(|error| panic!("could not initialise procedural audio: {error}"));
     let mut renderer = fx::PhosphorRenderer::new()
         .unwrap_or_else(|error| panic!("could not initialise phosphor renderer: {error}"));
     let mut accumulator = 0.0_f32;
+    let mut previous_mute = false;
     loop {
         let input = InputState {
             left: is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
@@ -254,27 +286,52 @@ async fn windowed_main() {
             fire: is_key_down(KeyCode::Space),
             start: is_key_down(KeyCode::Enter),
             pause: is_key_down(KeyCode::P),
+            mute: is_key_down(KeyCode::M),
             escape: is_key_down(KeyCode::Escape),
         };
+        if input.mute && !previous_mute {
+            audio_player.toggle_mute();
+        }
+        previous_mute = input.mute;
         let frame_seconds = get_frame_time().min(0.25);
         accumulator += frame_seconds;
         while accumulator >= TICK_SECONDS {
             simulation.tick(input);
+            for event in simulation.drain_sfx_events() {
+                audio_player.handle_event(event);
+            }
             accumulator -= TICK_SECONDS;
         }
+        audio_player.update(frame_seconds);
         if simulation.quit_requested() {
             break;
         }
 
-        let display_list = simulation.display_list();
+        let mut display_list = simulation.display_list();
+        if audio_player.is_muted() {
+            append_muted_indicator(&mut display_list);
+        }
         renderer.draw(&display_list, frame_seconds);
         next_frame().await;
     }
 }
 
+fn append_muted_indicator(display_list: &mut vector::DisplayList) {
+    const HEIGHT: f32 = 17.0;
+    const MARGIN: f32 = 14.0;
+    let width = font::text_width("MUTED", HEIGHT);
+    font::draw_text(
+        display_list,
+        "MUTED",
+        macroquad::math::vec2(VIRTUAL_WIDTH as f32 - MARGIN - width, 738.0),
+        HEIGHT,
+        0.72,
+    );
+}
+
 fn print_help() {
     println!(
-        "Omega Rust — M3 arcade game\n\
+        "Omega Rust — M4 arcade game\n\
          \n\
          USAGE:\n\
            omega_rust                         Start the windowed game\n\
@@ -284,20 +341,21 @@ fn print_help() {
            --frames N       Number of fixed 60 Hz simulation frames (required)\n\
            --shot-every M   Save every Mth frame; default saves only the last\n\
            --out DIR        PNG directory (default: verify/out)\n\
+           --dump-sfx DIR   Write all synthesized effects as WAV files\n\
            --seed S         Deterministic decimal or 0x-prefixed seed\n\
            --script FILE    Input script to run\n\
          \n\
          SCRIPT FORMAT:\n\
            START-END: key[,key...]\n\
          Ranges are 0-based and inclusive. Keys are left, right, thrust, fire,\n\
-         start, pause, and escape. Matching ranges are combined. Blank lines and text\n\
+         start, pause, mute, and escape. Matching ranges are combined. Blank lines and text\n\
          after # are ignored. Example:\n\
            0-45: thrust,right\n\
            20-20: fire\n\
          \n\
          WINDOW CONTROLS:\n\
            Left/Right or A/D rotate, Up/W thrust, Space fire, Enter start,\n\
-           P pause, Esc back/quit"
+           P pause, M mute, Esc back/quit"
     );
 }
 

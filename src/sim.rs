@@ -92,7 +92,27 @@ pub struct InputState {
     pub fire: bool,
     pub start: bool,
     pub pause: bool,
+    pub mute: bool,
     pub escape: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SfxEvent {
+    Fire,
+    Bounce,
+    EnemyBounce,
+    EnemyExplode,
+    PlayerExplode,
+    MinePop,
+    BulletFizzle,
+    ExtraShip,
+    WaveClear,
+    FleetBonus,
+    MineSweep,
+    Promote,
+    ThrustOn,
+    ThrustOff,
+    ConvoyTick { living_ships: u8, wave_ships: u8 },
 }
 
 impl InputState {
@@ -104,6 +124,7 @@ impl InputState {
             fire: self.fire || other.fire,
             start: self.start || other.start,
             pause: self.pause || other.pause,
+            mute: self.mute || other.mute,
             escape: self.escape || other.escape,
         }
     }
@@ -164,6 +185,9 @@ pub struct Simulation {
     extra_ship_flash: f32,
     new_high_score: bool,
     high_score_path: Option<PathBuf>,
+    sfx_events: Vec<SfxEvent>,
+    convoy_tick_timer: f32,
+    convoy_wave_ships: usize,
 }
 
 impl Simulation {
@@ -220,10 +244,14 @@ impl Simulation {
             extra_ship_flash: 0.0,
             new_high_score: false,
             high_score_path,
+            sfx_events: Vec::new(),
+            convoy_tick_timer: 0.0,
+            convoy_wave_ships: 0,
         }
     }
 
     pub fn tick(&mut self, input: InputState) {
+        self.sfx_events.clear();
         let start_pressed = input.start && !self.previous_start;
         let pause_pressed = input.pause && !self.previous_pause;
         let escape_pressed = input.escape && !self.previous_escape;
@@ -253,7 +281,7 @@ impl Simulation {
         }
         if self.paused {
             self.previous_fire = input.fire;
-            self.thrusting = false;
+            self.set_thrusting(false);
             self.frame = self.frame.wrapping_add(1);
             return;
         }
@@ -270,6 +298,7 @@ impl Simulation {
             GameState::ShipDeath => self.update_ship_death(),
             GameState::GameOver => self.update_game_over(),
         }
+        self.update_convoy_tick();
 
         self.previous_fire = input.fire;
         self.frame = self.frame.wrapping_add(1);
@@ -278,6 +307,10 @@ impl Simulation {
 
     pub fn quit_requested(&self) -> bool {
         self.quit_requested
+    }
+
+    pub fn drain_sfx_events(&mut self) -> Vec<SfxEvent> {
+        mem::take(&mut self.sfx_events)
     }
 
     #[cfg(test)]
@@ -296,7 +329,7 @@ impl Simulation {
         self.state = GameState::Playing;
         self.state_frame = 0;
         self.paused = false;
-        self.thrusting = false;
+        self.set_thrusting(false);
         self.score = 0;
         self.score_flash = 0.0;
         self.ships = 3;
@@ -311,7 +344,7 @@ impl Simulation {
         self.state = GameState::Attract;
         self.state_frame = 0;
         self.paused = false;
-        self.thrusting = false;
+        self.set_thrusting(false);
         self.shots.clear();
         self.enemies.clear();
         self.enemy_bullets.clear();
@@ -323,7 +356,7 @@ impl Simulation {
         self.state_frame = 0;
         self.game_over_timer = GAME_OVER_SECONDS;
         self.paused = false;
-        self.thrusting = false;
+        self.set_thrusting(false);
         self.shots.clear();
         self.enemies.clear();
         self.enemy_bullets.clear();
@@ -427,7 +460,7 @@ impl Simulation {
             (self.player.rotation + self.player.angular_velocity * TICK_SECONDS).rem_euclid(TAU);
 
         let facing = direction(self.player.rotation);
-        self.thrusting = input.thrust;
+        self.set_thrusting(input.thrust);
         if input.thrust {
             self.player.velocity += facing * THRUST_ACCELERATION * TICK_SECONDS;
             if self.frame.is_multiple_of(2) {
@@ -441,47 +474,58 @@ impl Simulation {
         self.player.velocity *= drag;
         self.player.velocity = self.player.velocity.clamp_length_max(MAX_SPEED);
         self.player.position += self.player.velocity * TICK_SECONDS;
-        resolve_circle_arena(
+        if resolve_circle_arena(
             &mut self.player.position,
             &mut self.player.velocity,
             SHIP_RADIUS,
             &mut self.border_flash,
-        );
+        ) {
+            self.sfx_events.push(SfxEvent::Bounce);
+        }
 
         if input.fire && !self.previous_fire && self.shots.len() < MAX_SHOTS {
             self.shots.push(Shot {
                 position: self.player.position + facing * 17.0,
                 velocity: facing * SHOT_SPEED,
             });
+            self.sfx_events.push(SfxEvent::Fire);
         }
     }
 
     fn update_shots_walls(&mut self) {
         let mut flashes = [false; 8];
+        let mut fizzles = 0;
         self.shots.retain_mut(|shot| {
             shot.position += shot.velocity * TICK_SECONDS;
             if let Some(edge) = projectile_collision_edge(shot.position) {
                 flashes[edge] = true;
+                fizzles += 1;
                 false
             } else {
                 true
             }
         });
         apply_flashes(&mut self.border_flash, flashes);
+        self.sfx_events
+            .extend((0..fizzles).map(|_| SfxEvent::BulletFizzle));
     }
 
     fn update_enemy_bullets(&mut self) {
         let mut flashes = [false; 8];
+        let mut fizzles = 0;
         self.enemy_bullets.retain_mut(|bullet| {
             bullet.position += bullet.velocity * TICK_SECONDS;
             if let Some(edge) = projectile_collision_edge(bullet.position) {
                 flashes[edge] = true;
+                fizzles += 1;
                 false
             } else {
                 true
             }
         });
         apply_flashes(&mut self.border_flash, flashes);
+        self.sfx_events
+            .extend((0..fizzles).map(|_| SfxEvent::BulletFizzle));
     }
 
     fn update_enemies(&mut self) {
@@ -489,6 +533,7 @@ impl Simulation {
         let convoy_direction = self.convoy_direction;
         let mut new_bullets = Vec::new();
         let mut vapor_mines = Vec::new();
+        let mut enemy_bounces = 0;
 
         for enemy in &mut self.enemies {
             enemy.age += TICK_SECONDS;
@@ -514,12 +559,14 @@ impl Simulation {
                     let angle = enemy.velocity.y.atan2(enemy.velocity.x) + steering * TICK_SECONDS;
                     enemy.velocity = direction(angle) * speed;
                     enemy.position += enemy.velocity * TICK_SECONDS;
-                    resolve_circle_arena(
+                    if resolve_circle_arena(
                         &mut enemy.position,
                         &mut enemy.velocity,
                         enemy.kind.radius(),
                         &mut self.border_flash,
-                    );
+                    ) {
+                        enemy_bounces += 1;
+                    }
                     enemy.rotation = enemy.velocity.y.atan2(enemy.velocity.x);
 
                     enemy.action_timer -= TICK_SECONDS;
@@ -552,16 +599,20 @@ impl Simulation {
                     enemy.velocity += desired * 230.0 * TICK_SECONDS;
                     enemy.velocity = enemy.velocity.clamp_length_max(DEATH_MAX_SPEED);
                     enemy.position += enemy.velocity * TICK_SECONDS;
-                    resolve_circle_arena(
+                    if resolve_circle_arena(
                         &mut enemy.position,
                         &mut enemy.velocity,
                         enemy.kind.radius(),
                         &mut self.border_flash,
-                    );
+                    ) {
+                        enemy_bounces += 1;
+                    }
                     enemy.rotation = enemy.velocity.y.atan2(enemy.velocity.x);
                 }
             }
         }
+        self.sfx_events
+            .extend((0..enemy_bounces).map(|_| SfxEvent::EnemyBounce));
         self.enemy_bullets.extend(new_bullets);
         for (position, rotation) in vapor_mines {
             self.try_spawn_mine(EnemyKind::VaporMine, position, rotation);
@@ -645,6 +696,7 @@ impl Simulation {
             .range_f32(COMMAND_MIN_FIRE_SECONDS, COMMAND_MAX_FIRE_SECONDS);
         enemy.mine_timer = self.rng.range_f32(5.0, 7.0);
         enemy.wander_phase = self.rng.range_f32(0.0, TAU);
+        self.sfx_events.push(SfxEvent::Promote);
     }
 
     fn promote_to_death(&mut self, index: usize) {
@@ -655,6 +707,7 @@ impl Simulation {
         enemy.kind = EnemyKind::Death;
         enemy.age = 0.0;
         enemy.velocity = enemy.velocity.normalize_or_zero() * 220.0;
+        self.sfx_events.push(SfxEvent::Promote);
     }
 
     fn update_droid_mine_drop(&mut self) {
@@ -716,6 +769,11 @@ impl Simulation {
         let old_enemies = mem::take(&mut self.enemies);
         for (index, enemy) in old_enemies.into_iter().enumerate() {
             if enemy_dead[index] {
+                self.sfx_events.push(if enemy.kind.is_mine() {
+                    SfxEvent::MinePop
+                } else {
+                    SfxEvent::EnemyExplode
+                });
                 self.spawn_enemy_shatter(&enemy, 0.9, 115.0);
                 self.award_points(enemy.kind.points());
             } else {
@@ -761,10 +819,11 @@ impl Simulation {
             &mut self.rng,
         );
         self.ships = self.ships.saturating_sub(1);
+        self.sfx_events.push(SfxEvent::PlayerExplode);
         self.state = GameState::ShipDeath;
         self.state_frame = 0;
         self.death_timer = SHIP_DEATH_SECONDS;
-        self.thrusting = false;
+        self.set_thrusting(false);
         self.shots.clear();
     }
 
@@ -799,6 +858,8 @@ impl Simulation {
     fn complete_wave(&mut self) {
         self.enemy_bullets.clear();
         if is_fleet_bonus_wave(self.wave) {
+            self.sfx_events.push(SfxEvent::FleetBonus);
+            self.sfx_events.push(SfxEvent::MineSweep);
             let old_enemies = mem::take(&mut self.enemies);
             for enemy in old_enemies {
                 if enemy.kind.is_mine() {
@@ -811,6 +872,7 @@ impl Simulation {
             self.play_phase = PlayPhase::FleetBonus;
             self.phase_timer = FLEET_BONUS_SECONDS;
         } else {
+            self.sfx_events.push(SfxEvent::WaveClear);
             self.play_phase = PlayPhase::WaveCleared;
             self.phase_timer = WAVE_CLEARED_SECONDS;
         }
@@ -821,6 +883,7 @@ impl Simulation {
         self.score_flash = SCORE_FLASH_SECONDS;
         while self.score >= self.next_extra_ship {
             self.ships = self.ships.saturating_add(1);
+            self.sfx_events.push(SfxEvent::ExtraShip);
             self.extra_ship_flash = 2.0;
             self.next_extra_ship = if self.next_extra_ship == 40_000 {
                 100_000
@@ -850,6 +913,47 @@ impl Simulation {
         self.mine_drop_timer = 3.4;
         self.lone_timer = LONE_PROMOTION_SECONDS;
         self.last_ship_count = count;
+        self.convoy_tick_timer = 0.0;
+        self.convoy_wave_ships = count;
+    }
+
+    fn set_thrusting(&mut self, thrusting: bool) {
+        if self.thrusting == thrusting {
+            return;
+        }
+        self.thrusting = thrusting;
+        self.sfx_events.push(if thrusting {
+            SfxEvent::ThrustOn
+        } else {
+            SfxEvent::ThrustOff
+        });
+    }
+
+    fn update_convoy_tick(&mut self) {
+        if !matches!(self.state, GameState::Playing | GameState::ShipDeath)
+            || self.play_phase != PlayPhase::Active
+        {
+            return;
+        }
+        let living_ships = self.ship_count();
+        if living_ships == 0 || self.convoy_wave_ships == 0 {
+            return;
+        }
+
+        self.convoy_tick_timer -= TICK_SECONDS;
+        if self.convoy_tick_timer > 0.0 {
+            return;
+        }
+        self.sfx_events.push(SfxEvent::ConvoyTick {
+            living_ships: living_ships.min(u8::MAX as usize) as u8,
+            wave_ships: self.convoy_wave_ships.min(u8::MAX as usize) as u8,
+        });
+
+        let eliminated = self.convoy_wave_ships.saturating_sub(living_ships) as f32;
+        let denominator = self.convoy_wave_ships.saturating_sub(1).max(1) as f32;
+        let pressure = (eliminated / denominator).clamp(0.0, 1.0);
+        let interval = 0.72 + (0.22 - 0.72) * pressure;
+        self.convoy_tick_timer += interval;
     }
 
     fn ship_count(&self) -> usize {
@@ -898,7 +1002,8 @@ fn resolve_circle_arena(
     velocity: &mut Vec2,
     radius: f32,
     border_flash: &mut [f32; 8],
-) {
+) -> bool {
+    let mut bounced = false;
     if resolve_axis_wall(
         &mut position.x,
         OUTER_LEFT + radius,
@@ -907,6 +1012,7 @@ fn resolve_circle_arena(
         vec2(1.0, 0.0),
     ) {
         flash_border_edge(border_flash, OUTER_LEFT_EDGE);
+        bounced = true;
     }
     if resolve_axis_wall(
         &mut position.x,
@@ -916,6 +1022,7 @@ fn resolve_circle_arena(
         vec2(-1.0, 0.0),
     ) {
         flash_border_edge(border_flash, OUTER_RIGHT_EDGE);
+        bounced = true;
     }
     if resolve_axis_wall(
         &mut position.y,
@@ -925,6 +1032,7 @@ fn resolve_circle_arena(
         vec2(0.0, 1.0),
     ) {
         flash_border_edge(border_flash, OUTER_TOP_EDGE);
+        bounced = true;
     }
     if resolve_axis_wall(
         &mut position.y,
@@ -934,6 +1042,7 @@ fn resolve_circle_arena(
         vec2(0.0, -1.0),
     ) {
         flash_border_edge(border_flash, OUTER_BOTTOM_EDGE);
+        bounced = true;
     }
 
     let expanded_left = CONSOLE_LEFT - radius;
@@ -966,8 +1075,10 @@ fn resolve_circle_arena(
         if velocity.dot(normal) < 0.0 {
             *velocity = reflect_velocity(*velocity, normal, RESTITUTION);
             flash_border_edge(border_flash, edge);
+            bounced = true;
         }
     }
+    bounced
 }
 
 fn resolve_axis_wall(
@@ -1060,7 +1171,7 @@ mod tests {
     use macroquad::math::vec2;
 
     use super::{
-        reflect_velocity, Enemy, EnemyKind, GameState, InputState, PlayPhase, Simulation,
+        reflect_velocity, Enemy, EnemyKind, GameState, InputState, PlayPhase, SfxEvent, Simulation,
         TICK_SECONDS,
     };
     use crate::enemies::MINE_CAP;
@@ -1106,6 +1217,58 @@ mod tests {
             simulation.tick(InputState::default());
         }
         assert_eq!(simulation.shot_count(), 4);
+    }
+
+    #[test]
+    fn fire_and_thrust_events_are_tick_scoped_and_edge_triggered() {
+        let mut simulation = Simulation::new(19);
+        start(&mut simulation);
+        simulation.tick(InputState {
+            thrust: true,
+            fire: true,
+            ..InputState::default()
+        });
+        let events = simulation.drain_sfx_events();
+        assert!(events.contains(&SfxEvent::ThrustOn));
+        assert!(events.contains(&SfxEvent::Fire));
+
+        simulation.tick(InputState {
+            thrust: true,
+            fire: true,
+            ..InputState::default()
+        });
+        assert!(simulation.drain_sfx_events().is_empty());
+
+        simulation.tick(InputState::default());
+        assert_eq!(simulation.drain_sfx_events(), vec![SfxEvent::ThrustOff]);
+    }
+
+    #[test]
+    fn convoy_ticks_accelerate_and_report_the_living_fleet() {
+        let mut simulation = Simulation::new(20);
+        start(&mut simulation);
+        simulation.play_phase = PlayPhase::Active;
+        simulation.convoy_tick_timer = 0.0;
+        simulation.update_convoy_tick();
+        let full_fleet_interval = simulation.convoy_tick_timer;
+        assert!(simulation
+            .drain_sfx_events()
+            .contains(&SfxEvent::ConvoyTick {
+                living_ships: 5,
+                wave_ships: 5,
+            }));
+
+        simulation.enemies.truncate(1);
+        simulation.convoy_tick_timer = 0.0;
+        simulation.update_convoy_tick();
+        let last_ship_interval = simulation.convoy_tick_timer;
+        assert!(last_ship_interval < full_fleet_interval * 0.5);
+        assert!(simulation
+            .drain_sfx_events()
+            .contains(&SfxEvent::ConvoyTick {
+                living_ships: 1,
+                wave_ships: 5,
+            }));
     }
 
     #[test]
