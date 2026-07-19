@@ -8,12 +8,15 @@ use crate::{
 };
 
 const PHOSPHOR: [f32; 3] = [230.0, 240.0, 255.0];
+const GLOW_RADIUS: usize = 3;
+const GLOW_STRENGTH: f32 = 0.5;
 
 pub fn rasterize(display_list: &DisplayList) -> RgbImage {
     let mut image = RgbImage::new(VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
     for segment in display_list.as_slice() {
         rasterize_segment(&mut image, *segment);
     }
+    add_box_glow(&mut image);
     image
 }
 
@@ -68,6 +71,59 @@ fn put_phosphor_pixel(image: &mut RgbImage, x: i32, y: i32, intensity: f32) {
     }
 }
 
+fn add_box_glow(image: &mut RgbImage) {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    let kernel_width = GLOW_RADIUS * 2 + 1;
+    let source: Vec<f32> = image
+        .as_raw()
+        .chunks_exact(3)
+        .map(|pixel| pixel[2] as f32 / 255.0)
+        .collect();
+    let mut horizontal = vec![0.0_f32; width * height];
+
+    for y in 0..height {
+        let row = y * width;
+        let mut sum: f32 = source[row..row + GLOW_RADIUS.min(width - 1) + 1]
+            .iter()
+            .sum();
+        for x in 0..width {
+            horizontal[row + x] = sum / kernel_width as f32;
+            if x >= GLOW_RADIUS {
+                sum -= source[row + x - GLOW_RADIUS];
+            }
+            let entering = x + GLOW_RADIUS + 1;
+            if entering < width {
+                sum += source[row + entering];
+            }
+        }
+    }
+
+    let pixels = image.as_mut();
+    for x in 0..width {
+        let mut sum = 0.0;
+        for y in 0..=GLOW_RADIUS.min(height - 1) {
+            sum += horizontal[y * width + x];
+        }
+        for y in 0..height {
+            let glow = sum / kernel_width as f32 * GLOW_STRENGTH;
+            let pixel = &mut pixels[(y * width + x) * 3..][..3];
+            for (channel, phosphor) in pixel.iter_mut().zip(PHOSPHOR) {
+                *channel = (*channel as f32 + phosphor * glow)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+            if y >= GLOW_RADIUS {
+                sum -= horizontal[(y - GLOW_RADIUS) * width + x];
+            }
+            let entering = y + GLOW_RADIUS + 1;
+            if entering < height {
+                sum += horizontal[entering * width + x];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use macroquad::math::vec2;
@@ -80,7 +136,10 @@ mod tests {
         let mut display_list = DisplayList::new();
         display_list.push_line(vec2(10.0, 10.0), vec2(20.0, 10.0), 1.0);
         let image = rasterize(&display_list);
-        assert_eq!(image.get_pixel(15, 10).0, [230, 240, 255]);
-        assert_eq!(image.get_pixel(15, 12).0, [0, 0, 0]);
+        let core = image.get_pixel(15, 10).0;
+        let halo = image.get_pixel(15, 12).0;
+        assert!(core[2] > halo[2]);
+        assert!(halo[2] > 0);
+        assert_eq!(image, rasterize(&display_list));
     }
 }

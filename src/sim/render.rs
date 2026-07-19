@@ -12,9 +12,14 @@ use crate::{
 
 use super::{
     shape_seg, Simulation, BORDER_FLASH_SECONDS, BORDER_IDLE_INTENSITY, CONSOLE_BOTTOM,
-    CONSOLE_LEFT, CONSOLE_RIGHT, CONSOLE_TOP, ENEMY_BULLET_HALF_LENGTH, OUTER_BOTTOM, OUTER_LEFT,
-    OUTER_RIGHT, OUTER_TOP, SHIP_SHAPE, SHOT_HALF_LENGTH, TICK_RATE, TICK_SECONDS,
+    CONSOLE_LEFT, CONSOLE_RIGHT, CONSOLE_TOP, ENEMY_BULLET_HALF_LENGTH, FLEET_BONUS_SECONDS,
+    OUTER_BOTTOM, OUTER_LEFT, OUTER_RIGHT, OUTER_TOP, SHIP_SHAPE, SHOT_HALF_LENGTH, TICK_RATE,
+    TICK_SECONDS, WAVE_CLEARED_SECONDS,
 };
+
+const TITLE_SWEEP_SECONDS: f32 = 4.0;
+const INTERSTITIAL_ZOOM_SECONDS: f32 = 0.2;
+const SCORE_NORMAL_INTENSITY: f32 = 0.82;
 
 impl Simulation {
     pub fn display_list(&self) -> DisplayList {
@@ -42,7 +47,7 @@ impl Simulation {
     fn draw_attract(&self, display_list: &mut DisplayList) {
         let page = (self.state_frame / (8.0 * TICK_RATE) as u64) % 2;
         if page == 0 {
-            draw_text_centered(display_list, "OMEGA RUST", vec2(512.0, 112.0), 92.0, 1.0);
+            self.draw_attract_title(display_list);
             let story = [
                 "THE TIME: 2081",
                 "FOR A CENTURY THE PILOTS OF OMEGA",
@@ -75,6 +80,32 @@ impl Simulation {
 
         if self.press_enter_visible() {
             draw_text_centered(display_list, "PRESS ENTER", vec2(512.0, 702.0), 32.0, 0.95);
+        }
+    }
+
+    fn draw_attract_title(&self, display_list: &mut DisplayList) {
+        const TITLE: &str = "OMEGA RUST";
+        const HEIGHT: f32 = 92.0;
+        const BASE_INTENSITY: f32 = 0.76;
+
+        let first_segment = display_list.segments.len();
+        draw_text_centered(
+            display_list,
+            TITLE,
+            vec2(512.0, 112.0),
+            HEIGHT,
+            BASE_INTENSITY,
+        );
+
+        let width = text_width(TITLE, HEIGHT);
+        let left = 512.0 - width * 0.5;
+        let phase = (self.state_frame as f32 * TICK_SECONDS / TITLE_SWEEP_SECONDS).fract();
+        let highlight_x = left - HEIGHT + phase * (width + HEIGHT * 2.0);
+        for segment in &mut display_list.segments[first_segment..] {
+            let midpoint_x = (segment.a.x + segment.b.x) * 0.5;
+            let highlight =
+                (1.0 - (midpoint_x - highlight_x).abs() / (HEIGHT * 0.9)).clamp(0.0, 1.0);
+            segment.intensity += (1.0 - segment.intensity) * highlight * highlight;
         }
     }
 
@@ -167,20 +198,22 @@ impl Simulation {
                 draw_text_centered(display_list, "GET READY", vec2(512.0, 126.0), 24.0, 0.65);
             }
             PlayPhase::WaveCleared => {
+                let scale = interstitial_scale(self.phase_timer, WAVE_CLEARED_SECONDS);
                 draw_text_centered(
                     display_list,
                     &format!("WAVE {} CLEARED", self.wave),
                     vec2(512.0, 96.0),
-                    36.0,
+                    36.0 * scale,
                     1.0,
                 );
             }
             PlayPhase::FleetBonus => {
+                let scale = interstitial_scale(self.phase_timer, FLEET_BONUS_SECONDS);
                 draw_text_centered(
                     display_list,
                     "FLEET BONUS 5000",
                     vec2(512.0, 96.0),
-                    38.0,
+                    38.0 * scale,
                     1.0,
                 );
             }
@@ -269,7 +302,11 @@ impl Simulation {
             &self.score.to_string(),
             vec2(center_x, 418.0),
             56.0,
-            0.96,
+            if self.score_flash > 0.0 {
+                1.0
+            } else {
+                SCORE_NORMAL_INTENSITY
+            },
         );
 
         let visible_ships = self.ships.min(9) as usize;
@@ -348,6 +385,21 @@ impl Simulation {
                 1.0,
                 0.68,
             );
+            if self.frame % 4 < 2 {
+                let flicker = [shape_seg(
+                    -9.0 - self.exhaust_length * 0.42,
+                    -self.exhaust_spread * 0.28,
+                    -9.0 - self.exhaust_length * 1.08,
+                    self.exhaust_spread * 0.12,
+                )];
+                display_list.shape_at(
+                    &flicker,
+                    self.player.position,
+                    self.player.rotation,
+                    1.0,
+                    0.54,
+                );
+            }
         }
     }
 
@@ -377,4 +429,10 @@ impl Simulation {
 fn border_intensity(timer: f32) -> f32 {
     let flash = (timer / BORDER_FLASH_SECONDS).clamp(0.0, 1.0);
     BORDER_IDLE_INTENSITY + (1.0 - BORDER_IDLE_INTENSITY) * flash
+}
+
+fn interstitial_scale(timer: f32, duration: f32) -> f32 {
+    let progress = ((duration - timer) / INTERSTITIAL_ZOOM_SECONDS).clamp(0.0, 1.0);
+    let eased = progress * progress * (3.0 - 2.0 * progress);
+    0.8 + eased * 0.2
 }

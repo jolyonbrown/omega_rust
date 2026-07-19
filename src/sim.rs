@@ -47,7 +47,9 @@ const SHOT_HALF_LENGTH: f32 = 5.5;
 const ENEMY_BULLET_HALF_LENGTH: f32 = 5.0;
 const MAX_SHOTS: usize = 4;
 const BORDER_FLASH_SECONDS: f32 = 0.3;
+const BORDER_NEIGHBOUR_FLASH_STRENGTH: f32 = 0.3;
 const BORDER_IDLE_INTENSITY: f32 = 0.15;
+const SCORE_FLASH_SECONDS: f32 = 0.15;
 const SPAWN_WARNING_SECONDS: f32 = 1.5;
 const WAVE_CLEARED_SECONDS: f32 = 2.0;
 const FLEET_BONUS_SECONDS: f32 = 2.5;
@@ -154,6 +156,7 @@ pub struct Simulation {
     last_ship_count: usize,
     convoy_direction: f32,
     score: u32,
+    score_flash: f32,
     high_score: u32,
     ships: u32,
     wave: u32,
@@ -209,6 +212,7 @@ impl Simulation {
             last_ship_count: 0,
             convoy_direction: 1.0,
             score: 0,
+            score_flash: 0.0,
             high_score,
             ships: 3,
             wave: 1,
@@ -258,6 +262,7 @@ impl Simulation {
             *timer = (*timer - TICK_SECONDS).max(0.0);
         }
         self.extra_ship_flash = (self.extra_ship_flash - TICK_SECONDS).max(0.0);
+        self.score_flash = (self.score_flash - TICK_SECONDS).max(0.0);
 
         match self.state {
             GameState::Attract => {}
@@ -293,6 +298,7 @@ impl Simulation {
         self.paused = false;
         self.thrusting = false;
         self.score = 0;
+        self.score_flash = 0.0;
         self.ships = 3;
         self.wave = 1;
         self.next_extra_ship = 40_000;
@@ -425,7 +431,8 @@ impl Simulation {
         if input.thrust {
             self.player.velocity += facing * THRUST_ACCELERATION * TICK_SECONDS;
             if self.frame.is_multiple_of(2) {
-                self.exhaust_length = self.rng.range_f32(9.0, 16.0);
+                let speed_extension = (self.player.velocity.length() / MAX_SPEED).min(1.0) * 10.0;
+                self.exhaust_length = self.rng.range_f32(9.0, 16.0) + speed_extension;
                 self.exhaust_spread = self.rng.range_f32(2.0, 5.0);
             }
         }
@@ -811,6 +818,7 @@ impl Simulation {
 
     fn award_points(&mut self, points: u32) {
         self.score = self.score.saturating_add(points);
+        self.score_flash = SCORE_FLASH_SECONDS;
         while self.score >= self.next_extra_ship {
             self.ships = self.ships.saturating_add(1);
             self.extra_ship_flash = 2.0;
@@ -891,38 +899,42 @@ fn resolve_circle_arena(
     radius: f32,
     border_flash: &mut [f32; 8],
 ) {
-    resolve_axis_wall(
+    if resolve_axis_wall(
         &mut position.x,
         OUTER_LEFT + radius,
         true,
         velocity,
         vec2(1.0, 0.0),
-        &mut border_flash[OUTER_LEFT_EDGE],
-    );
-    resolve_axis_wall(
+    ) {
+        flash_border_edge(border_flash, OUTER_LEFT_EDGE);
+    }
+    if resolve_axis_wall(
         &mut position.x,
         OUTER_RIGHT - radius,
         false,
         velocity,
         vec2(-1.0, 0.0),
-        &mut border_flash[OUTER_RIGHT_EDGE],
-    );
-    resolve_axis_wall(
+    ) {
+        flash_border_edge(border_flash, OUTER_RIGHT_EDGE);
+    }
+    if resolve_axis_wall(
         &mut position.y,
         OUTER_TOP + radius,
         true,
         velocity,
         vec2(0.0, 1.0),
-        &mut border_flash[OUTER_TOP_EDGE],
-    );
-    resolve_axis_wall(
+    ) {
+        flash_border_edge(border_flash, OUTER_TOP_EDGE);
+    }
+    if resolve_axis_wall(
         &mut position.y,
         OUTER_BOTTOM - radius,
         false,
         velocity,
         vec2(0.0, -1.0),
-        &mut border_flash[OUTER_BOTTOM_EDGE],
-    );
+    ) {
+        flash_border_edge(border_flash, OUTER_BOTTOM_EDGE);
+    }
 
     let expanded_left = CONSOLE_LEFT - radius;
     let expanded_right = CONSOLE_RIGHT + radius;
@@ -953,7 +965,7 @@ fn resolve_circle_arena(
         *position = corrected_position;
         if velocity.dot(normal) < 0.0 {
             *velocity = reflect_velocity(*velocity, normal, RESTITUTION);
-            border_flash[edge] = BORDER_FLASH_SECONDS;
+            flash_border_edge(border_flash, edge);
         }
     }
 }
@@ -964,8 +976,7 @@ fn resolve_axis_wall(
     is_minimum: bool,
     velocity: &mut Vec2,
     inward_normal: Vec2,
-    flash_timer: &mut f32,
-) {
+) -> bool {
     let crossed = if is_minimum {
         *coordinate < limit
     } else {
@@ -975,9 +986,10 @@ fn resolve_axis_wall(
         *coordinate = limit;
         if velocity.dot(inward_normal) < 0.0 {
             *velocity = reflect_velocity(*velocity, inward_normal, RESTITUTION);
-            *flash_timer = BORDER_FLASH_SECONDS;
+            return true;
         }
     }
+    false
 }
 
 fn projectile_collision_edge(position: Vec2) -> Option<usize> {
@@ -1027,9 +1039,20 @@ fn segment_circle_hit(a: Vec2, b: Vec2, center: Vec2, radius: f32) -> bool {
 fn apply_flashes(border_flash: &mut [f32; 8], flashes: [bool; 8]) {
     for (edge, hit) in flashes.into_iter().enumerate() {
         if hit {
-            border_flash[edge] = BORDER_FLASH_SECONDS;
+            flash_border_edge(border_flash, edge);
         }
     }
+}
+
+fn flash_border_edge(border_flash: &mut [f32; 8], edge: usize) {
+    let group_start = edge / 4 * 4;
+    let local_edge = edge % 4;
+    let neighbour_flash = BORDER_FLASH_SECONDS * BORDER_NEIGHBOUR_FLASH_STRENGTH;
+    for neighbour in [(local_edge + 3) % 4, (local_edge + 1) % 4] {
+        let timer = &mut border_flash[group_start + neighbour];
+        *timer = timer.max(neighbour_flash);
+    }
+    border_flash[edge] = BORDER_FLASH_SECONDS;
 }
 
 #[cfg(test)]
@@ -1056,6 +1079,18 @@ mod tests {
         let reflected = reflect_velocity(velocity, vec2(1.0, 0.0), 0.9);
         assert!((reflected - vec2(27.0, 36.0)).length() < 0.0001);
         assert!((reflected.length() - velocity.length() * 0.9).abs() < 0.0001);
+    }
+
+    #[test]
+    fn border_flash_spills_to_adjacent_edges_at_reduced_strength() {
+        let mut flashes = [0.0; 8];
+        super::flash_border_edge(&mut flashes, super::OUTER_TOP_EDGE);
+        assert_eq!(flashes[super::OUTER_TOP_EDGE], super::BORDER_FLASH_SECONDS);
+        let neighbour = super::BORDER_FLASH_SECONDS * super::BORDER_NEIGHBOUR_FLASH_STRENGTH;
+        assert_eq!(flashes[super::OUTER_LEFT_EDGE], neighbour);
+        assert_eq!(flashes[super::OUTER_RIGHT_EDGE], neighbour);
+        assert_eq!(flashes[super::OUTER_BOTTOM_EDGE], 0.0);
+        assert!(flashes[4..].iter().all(|timer| *timer == 0.0));
     }
 
     #[test]

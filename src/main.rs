@@ -1,5 +1,6 @@
 mod enemies;
 mod font;
+mod fx;
 mod game;
 mod headless;
 mod hiscore;
@@ -239,12 +240,11 @@ fn window_conf() -> macroquad::conf::Conf {
 }
 
 async fn windowed_main() {
-    use macroquad::prelude::{
-        clear_background, draw_line, get_frame_time, is_key_down, next_frame, screen_height,
-        screen_width, Color, KeyCode, BLACK,
-    };
+    use macroquad::prelude::{get_frame_time, is_key_down, next_frame, KeyCode};
 
     let mut simulation = Simulation::persistent(DEFAULT_SEED);
+    let mut renderer = fx::PhosphorRenderer::new()
+        .unwrap_or_else(|error| panic!("could not initialise phosphor renderer: {error}"));
     let mut accumulator = 0.0_f32;
     loop {
         let input = InputState {
@@ -256,7 +256,8 @@ async fn windowed_main() {
             pause: is_key_down(KeyCode::P),
             escape: is_key_down(KeyCode::Escape),
         };
-        accumulator += get_frame_time().min(0.25);
+        let frame_seconds = get_frame_time().min(0.25);
+        accumulator += frame_seconds;
         while accumulator >= TICK_SECONDS {
             simulation.tick(input);
             accumulator -= TICK_SECONDS;
@@ -266,35 +267,14 @@ async fn windowed_main() {
         }
 
         let display_list = simulation.display_list();
-        clear_background(BLACK);
-        let scale =
-            (screen_width() / VIRTUAL_WIDTH as f32).min(screen_height() / VIRTUAL_HEIGHT as f32);
-        let offset_x = (screen_width() - VIRTUAL_WIDTH as f32 * scale) * 0.5;
-        let offset_y = (screen_height() - VIRTUAL_HEIGHT as f32 * scale) * 0.5;
-        for segment in display_list.as_slice() {
-            let intensity = segment.intensity.clamp(0.0, 1.0);
-            let colour = Color::new(
-                230.0 / 255.0 * intensity,
-                240.0 / 255.0 * intensity,
-                intensity,
-                1.0,
-            );
-            draw_line(
-                offset_x + segment.a.x * scale,
-                offset_y + segment.a.y * scale,
-                offset_x + segment.b.x * scale,
-                offset_y + segment.b.y * scale,
-                (1.5 * scale).max(1.0),
-                colour,
-            );
-        }
+        renderer.draw(&display_list, frame_seconds);
         next_frame().await;
     }
 }
 
 fn print_help() {
     println!(
-        "Omega Rust — M2 arcade game\n\
+        "Omega Rust — M3 arcade game\n\
          \n\
          USAGE:\n\
            omega_rust                         Start the windowed game\n\
