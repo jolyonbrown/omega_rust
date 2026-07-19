@@ -3,6 +3,7 @@ mod enemies;
 mod font;
 mod fx;
 mod game;
+#[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod hiscore;
 mod particles;
@@ -10,6 +11,7 @@ mod rng;
 mod sim;
 mod vector;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -20,6 +22,7 @@ use sim::{InputState, Simulation, TICK_SECONDS, VIRTUAL_HEIGHT, VIRTUAL_WIDTH};
 
 const DEFAULT_SEED: u64 = 0x4f4d_4547_4152_5553;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> ExitCode {
     let arguments: Vec<String> = env::args().skip(1).collect();
 
@@ -47,6 +50,12 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    macroquad::Window::from_config(window_conf(), windowed_main());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct HeadlessOptions {
     frames: usize,
@@ -57,6 +66,7 @@ struct HeadlessOptions {
     script: Option<PathBuf>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug)]
 struct ScriptRange {
     start: usize,
@@ -64,6 +74,7 @@ struct ScriptRange {
     input: InputState,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, String> {
     let mut frames = None;
     let mut shot_every = None;
@@ -109,6 +120,7 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
     let number = value
         .parse::<usize>()
@@ -120,6 +132,7 @@ fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_seed(value: &str) -> Result<u64, String> {
     let parsed = if let Some(hex) = value
         .strip_prefix("0x")
@@ -132,6 +145,7 @@ fn parse_seed(value: &str) -> Result<u64, String> {
     parsed.map_err(|_| format!("invalid seed: {value}"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_headless(options: HeadlessOptions) -> Result<(), String> {
     if let Some(directory) = &options.dump_sfx_directory {
         let bank = audio::SfxBank::generate();
@@ -183,6 +197,7 @@ fn run_headless(options: HeadlessOptions) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_script(path: &Path) -> Result<Vec<ScriptRange>, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
@@ -244,6 +259,7 @@ fn parse_script(path: &Path) -> Result<Vec<ScriptRange>, String> {
     Ok(ranges)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn script_input(ranges: &[ScriptRange], frame: usize) -> InputState {
     ranges
         .iter()
@@ -340,6 +356,7 @@ fn append_muted_indicator(display_list: &mut vector::DisplayList) {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn print_help() {
     println!(
         "Omega Rust — M4 arcade game\n\
@@ -370,7 +387,7 @@ fn print_help() {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{script_input, InputState, ScriptRange};
 

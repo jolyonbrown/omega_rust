@@ -3,7 +3,6 @@ mod render;
 use std::{
     f32::consts::{LN_2, PI, TAU},
     mem,
-    path::PathBuf,
 };
 
 use macroquad::math::{vec2, Vec2};
@@ -14,7 +13,7 @@ use crate::{
         COMMAND_MIN_FIRE_SECONDS, DEATH_MAX_SPEED, DROID_SPEED, MINE_CAP,
     },
     game::{is_fleet_bonus_wave, next_extra_ship_threshold, wave_size, GameState, PlayPhase},
-    hiscore::{self, DEFAULT_HIGH_SCORE},
+    hiscore::Storage as HighScoreStorage,
     particles::{self, Particle},
     rng::Rng,
     vector::Seg,
@@ -116,6 +115,7 @@ pub enum SfxEvent {
 }
 
 impl InputState {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn union(self, other: Self) -> Self {
         Self {
             left: self.left || other.left,
@@ -184,7 +184,7 @@ pub struct Simulation {
     next_extra_ship: u32,
     extra_ship_flash: f32,
     new_high_score: bool,
-    high_score_path: Option<PathBuf>,
+    high_score_storage: HighScoreStorage,
     sfx_events: Vec<SfxEvent>,
     convoy_tick_timer: f32,
     convoy_wave_ships: usize,
@@ -192,18 +192,23 @@ pub struct Simulation {
 
 impl Simulation {
     /// Deterministic, persistence-free simulation used by headless mode and tests.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(seed: u64) -> Self {
-        Self::with_high_score(seed, DEFAULT_HIGH_SCORE, None)
+        Self::with_high_score(
+            seed,
+            crate::hiscore::DEFAULT_HIGH_SCORE,
+            HighScoreStorage::session(),
+        )
     }
 
     /// Windowed simulation. This is the only constructor that reads high-score data.
     pub fn persistent(seed: u64) -> Self {
-        let path = hiscore::path_from_environment();
-        let high_score = hiscore::load(&path).unwrap_or(DEFAULT_HIGH_SCORE);
-        Self::with_high_score(seed, high_score, Some(path))
+        let high_score_storage = HighScoreStorage::persistent();
+        let high_score = high_score_storage.load();
+        Self::with_high_score(seed, high_score, high_score_storage)
     }
 
-    fn with_high_score(seed: u64, high_score: u32, high_score_path: Option<PathBuf>) -> Self {
+    fn with_high_score(seed: u64, high_score: u32, high_score_storage: HighScoreStorage) -> Self {
         Self {
             player: spawn_player(),
             shots: Vec::with_capacity(MAX_SHOTS),
@@ -243,7 +248,7 @@ impl Simulation {
             next_extra_ship: 40_000,
             extra_ship_flash: 0.0,
             new_high_score: false,
-            high_score_path,
+            high_score_storage,
             sfx_events: Vec::new(),
             convoy_tick_timer: 0.0,
             convoy_wave_ships: 0,
@@ -363,11 +368,7 @@ impl Simulation {
         self.new_high_score = self.score > self.high_score;
         if self.new_high_score {
             self.high_score = self.score;
-            if let Some(path) = &self.high_score_path {
-                if let Err(error) = hiscore::save(path, self.high_score) {
-                    eprintln!("could not save high score to {}: {error}", path.display());
-                }
-            }
+            self.high_score_storage.save(self.high_score);
         }
     }
 

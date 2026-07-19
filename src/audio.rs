@@ -1,4 +1,7 @@
-use std::{f32::consts::TAU, fs, io, path::Path};
+use std::f32::consts::TAU;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::{fs, io, path::Path};
 
 use macroquad::audio::{
     load_sound_from_bytes, play_sound, set_sound_volume, stop_sound, PlaySoundParams, Sound,
@@ -35,10 +38,12 @@ struct SfxClip {
 }
 
 impl SfxClip {
+    #[cfg(not(target_arch = "wasm32"))]
     fn duration_seconds(&self) -> f32 {
         self.samples.len() as f32 / SAMPLE_RATE as f32
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn peak(&self) -> f32 {
         self.samples
             .iter()
@@ -89,6 +94,7 @@ impl SfxBank {
         Self { clips }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn write_wavs(&self, directory: &Path) -> io::Result<()> {
         fs::create_dir_all(directory)?;
         for clip in &self.clips {
@@ -100,6 +106,7 @@ impl SfxBank {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn metrics(&self) -> impl Iterator<Item = (&'static str, f32, f32)> + '_ {
         self.clips
             .iter()
