@@ -142,6 +142,8 @@ impl AudioPlayer {
         let mut sounds = Vec::with_capacity(bank.clips.len());
         for clip in &bank.clips {
             let bytes = clip.wav_bytes();
+            #[cfg(target_arch = "wasm32")]
+            macroquad::prelude::info!("omega: decoding sfx {}", clip.name);
             let sound = load_sound_from_bytes(&bytes).await.map_err(|error| {
                 format!("could not load synthesized {} sound: {error}", clip.name)
             })?;

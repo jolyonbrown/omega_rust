@@ -276,6 +276,12 @@ fn window_conf() -> macroquad::conf::Conf {
             window_width: VIRTUAL_WIDTH as i32,
             window_height: VIRTUAL_HEIGHT as i32,
             window_resizable: true,
+            platform: macroquad::miniquad::conf::Platform {
+                // The phosphor pipeline's render passes hit glReadBuffer in
+                // miniquad's GL backend, which WebGL1 does not have.
+                webgl_version: macroquad::miniquad::conf::WebGLVersion::WebGL2,
+                ..Default::default()
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -286,12 +292,20 @@ async fn windowed_main() {
     use macroquad::prelude::{get_frame_time, is_key_down, is_key_pressed, next_frame, KeyCode};
 
     let mut simulation = Simulation::persistent(DEFAULT_SEED);
+    #[cfg(target_arch = "wasm32")]
+    macroquad::prelude::info!("omega: generating sfx bank");
     let generated_sfx = audio::SfxBank::generate();
+    #[cfg(target_arch = "wasm32")]
+    macroquad::prelude::info!("omega: sfx bank generated, loading sounds");
     let mut audio_player = audio::AudioPlayer::load(&generated_sfx)
         .await
         .unwrap_or_else(|error| panic!("could not initialise procedural audio: {error}"));
+    #[cfg(target_arch = "wasm32")]
+    macroquad::prelude::info!("omega: sounds loaded, creating renderer");
     let mut renderer = fx::PhosphorRenderer::new()
         .unwrap_or_else(|error| panic!("could not initialise phosphor renderer: {error}"));
+    #[cfg(target_arch = "wasm32")]
+    macroquad::prelude::info!("omega: renderer ready, entering game loop");
     let mut accumulator = 0.0_f32;
     let mut previous_mute = false;
     let mut fullscreen = false;
