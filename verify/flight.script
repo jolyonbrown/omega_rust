@@ -1,0 +1,16 @@
+# Launch toward the console, bounce away, then cross the lower track.
+10-50: thrust
+30-30: fire
+60-60: fire
+
+# Turn east while coasting toward the lower outer wall.
+94-111: right
+
+# Accelerate across the track toward the right wall and keep firing.
+112-235: thrust
+120-120: fire
+150-150: fire
+180-180: fire
+210-210: fire
+
+# Coast after the second outer-wall bounce so its flash can decay on camera.
