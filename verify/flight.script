@@ -1,4 +1,5 @@
 # Launch toward the console, bounce away, then cross the lower track.
+0-0: start
 10-50: thrust
 30-30: fire
 60-60: fire

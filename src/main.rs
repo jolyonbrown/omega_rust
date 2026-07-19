@@ -1,5 +1,9 @@
+mod enemies;
 mod font;
+mod game;
 mod headless;
+mod hiscore;
+mod particles;
 mod rng;
 mod sim;
 mod vector;
@@ -198,6 +202,7 @@ fn parse_script(path: &Path) -> Result<Vec<ScriptRange>, String> {
                 "fire" => input.fire = true,
                 "start" => input.start = true,
                 "pause" => input.pause = true,
+                "escape" => input.escape = true,
                 _ => {
                     return Err(format!(
                         "{}:{line_number}: unknown key {key:?}",
@@ -235,17 +240,13 @@ fn window_conf() -> macroquad::conf::Conf {
 
 async fn windowed_main() {
     use macroquad::prelude::{
-        clear_background, draw_line, get_frame_time, is_key_down, is_key_pressed, next_frame,
-        screen_height, screen_width, Color, KeyCode, BLACK,
+        clear_background, draw_line, get_frame_time, is_key_down, next_frame, screen_height,
+        screen_width, Color, KeyCode, BLACK,
     };
 
-    let mut simulation = Simulation::new(DEFAULT_SEED);
+    let mut simulation = Simulation::persistent(DEFAULT_SEED);
     let mut accumulator = 0.0_f32;
     loop {
-        if is_key_pressed(KeyCode::Escape) {
-            break;
-        }
-
         let input = InputState {
             left: is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
             right: is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
@@ -253,11 +254,15 @@ async fn windowed_main() {
             fire: is_key_down(KeyCode::Space),
             start: is_key_down(KeyCode::Enter),
             pause: is_key_down(KeyCode::P),
+            escape: is_key_down(KeyCode::Escape),
         };
         accumulator += get_frame_time().min(0.25);
         while accumulator >= TICK_SECONDS {
             simulation.tick(input);
             accumulator -= TICK_SECONDS;
+        }
+        if simulation.quit_requested() {
+            break;
         }
 
         let display_list = simulation.display_list();
@@ -289,7 +294,7 @@ async fn windowed_main() {
 
 fn print_help() {
     println!(
-        "Omega Rust — M1 vector flight\n\
+        "Omega Rust — M2 arcade game\n\
          \n\
          USAGE:\n\
            omega_rust                         Start the windowed game\n\
@@ -305,13 +310,14 @@ fn print_help() {
          SCRIPT FORMAT:\n\
            START-END: key[,key...]\n\
          Ranges are 0-based and inclusive. Keys are left, right, thrust, fire,\n\
-         start, and pause. Matching ranges are combined. Blank lines and text\n\
+         start, pause, and escape. Matching ranges are combined. Blank lines and text\n\
          after # are ignored. Example:\n\
            0-45: thrust,right\n\
            20-20: fire\n\
          \n\
          WINDOW CONTROLS:\n\
-           Left/Right or A/D rotate, Up/W thrust, Space fire, P pause, Esc quit"
+           Left/Right or A/D rotate, Up/W thrust, Space fire, Enter start,\n\
+           P pause, Esc back/quit"
     );
 }
 

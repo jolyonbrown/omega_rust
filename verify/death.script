@@ -1,0 +1,3 @@
+# The fixed-seed counter-clockwise convoy crosses the bottom-centre spawn.
+# Idling lets it collide with all three player ships and reach GAME OVER.
+0-0: start
