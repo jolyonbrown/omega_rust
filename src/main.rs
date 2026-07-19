@@ -1,181 +1,400 @@
-use bevy::prelude::*;
+mod audio;
+mod enemies;
+mod font;
+mod fx;
+mod game;
+mod headless;
+mod hiscore;
+mod particles;
+mod rng;
+mod sim;
+mod vector;
 
-const WINDOW_WIDTH: f32 = 800.0;
-const WINDOW_HEIGHT: f32 = 600.0;
-const BORDER_COLOR: Color = Color::YELLOW;
-const BACKGROUND_COLOR: Color = Color::BLACK;
-const TEXT_COLOR: Color = Color::YELLOW;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                resolution: (WINDOW_WIDTH, WINDOW_HEIGHT).into(),
-                title: "Omega Rust".to_string(),
-                ..default()
-            }),
-            ..default()
-        }))
-        .insert_resource(ClearColor(BACKGROUND_COLOR))
-        .add_systems(Startup, setup)
-        .add_systems(Update, (player_movement, update_score))
-        .run();
+use sim::{InputState, Simulation, TICK_SECONDS, VIRTUAL_HEIGHT, VIRTUAL_WIDTH};
+
+const DEFAULT_SEED: u64 = 0x4f4d_4547_4152_5553;
+
+fn main() -> ExitCode {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+
+    if arguments.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_help();
+        return ExitCode::SUCCESS;
+    }
+
+    if arguments.first().is_some_and(|arg| arg == "--headless") {
+        return match parse_headless_options(&arguments[1..]).and_then(run_headless) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}\n\nRun with --help for usage.");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if !arguments.is_empty() {
+        eprintln!("error: unknown windowed argument: {}", arguments[0]);
+        return ExitCode::FAILURE;
+    }
+
+    macroquad::Window::from_config(window_conf(), windowed_main());
+    ExitCode::SUCCESS
 }
 
-#[derive(Component)]
-struct Player;
-
-#[derive(Resource)]
-struct GameState {
-    score: u32,
-    high_score: u32,
-    lives: u8,
+#[derive(Debug)]
+struct HeadlessOptions {
+    frames: usize,
+    shot_every: Option<usize>,
+    output_directory: PathBuf,
+    dump_sfx_directory: Option<PathBuf>,
+    seed: u64,
+    script: Option<PathBuf>,
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.spawn(Camera2dBundle::default());
-
-    // Outer border
-    commands.spawn(SpriteBundle {
-        sprite: Sprite {
-            color: BORDER_COLOR,
-            custom_size: Some(Vec2::new(WINDOW_WIDTH - 4.0, WINDOW_HEIGHT - 4.0)),
-            ..default()
-        },
-        transform: Transform::from_xyz(0.0, 0.0, 0.0),
-        ..default()
-    });
-
-    // Inner border (gameplay area)
-    commands.spawn(SpriteBundle {
-        sprite: Sprite {
-            color: BACKGROUND_COLOR,
-            custom_size: Some(Vec2::new(WINDOW_WIDTH - 8.0, WINDOW_HEIGHT - 8.0)),
-            ..default()
-        },
-        transform: Transform::from_xyz(0.0, 0.0, 1.0),
-        ..default()
-    });
-
-    // Score area border
-    commands.spawn(SpriteBundle {
-        sprite: Sprite {
-            color: BORDER_COLOR,
-            custom_size: Some(Vec2::new(WINDOW_WIDTH * 0.8, WINDOW_HEIGHT * 0.2)),
-            ..default()
-        },
-        transform: Transform::from_xyz(0.0, WINDOW_HEIGHT * 0.3, 2.0),
-        ..default()
-    });
-
-    // Score text
-    commands.spawn(TextBundle::from_sections([
-        TextSection::new(
-            "SCORE\n0",
-            TextStyle {
-                font: asset_server.load("fonts/FiraCode-Medium.ttf"),
-                font_size: 20.0,
-                color: TEXT_COLOR,
-            },
-        ),
-    ])
-    .with_style(Style {
-        position_type: PositionType::Absolute,
-        top: Val::Px(WINDOW_HEIGHT * 0.4),
-        left: Val::Px(WINDOW_WIDTH * 0.1),
-        ..default()
-    }));
-
-    // High Score text
-    commands.spawn(TextBundle::from_sections([
-        TextSection::new(
-            "HIGH SCORE\n0",
-            TextStyle {
-                font: asset_server.load("fonts/FiraCode-Medium.ttf"),
-                font_size: 20.0,
-                color: TEXT_COLOR,
-            },
-        ),
-    ])
-    .with_style(Style {
-        position_type: PositionType::Absolute,
-        top: Val::Px(WINDOW_HEIGHT * 0.4),
-        right: Val::Px(WINDOW_WIDTH * 0.1),
-        ..default()
-    }));
-
-    // Player ship
-    commands.spawn((
-        SpriteBundle {
-            sprite: Sprite {
-                color: BORDER_COLOR,
-                custom_size: Some(Vec2::new(20.0, 20.0)),
-                ..default()
-            },
-            transform: Transform::from_xyz(WINDOW_WIDTH * 0.4, WINDOW_HEIGHT * 0.2, 3.0),
-            ..default()
-        },
-        Player,
-    ));
-
-    // Initialize game state
-    commands.insert_resource(GameState {
-        score: 0,
-        high_score: 0,
-        lives: 3,
-    });
+#[derive(Clone, Copy, Debug)]
+struct ScriptRange {
+    start: usize,
+    end: usize,
+    input: InputState,
 }
 
-fn player_movement(
-    keyboard_input: Res<Input<KeyCode>>,
-    mut query: Query<&mut Transform, With<Player>>,
-    time: Res<Time>,
-) {
-    let mut player_transform = query.single_mut();
-    let mut direction = Vec3::ZERO;
+fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, String> {
+    let mut frames = None;
+    let mut shot_every = None;
+    let mut output_directory = PathBuf::from("verify/out");
+    let mut dump_sfx_directory = None;
+    let mut seed = DEFAULT_SEED;
+    let mut script = None;
 
-    if keyboard_input.pressed(KeyCode::Left) {
-        direction += Vec3::new(-1.0, 0.0, 0.0);
-    }
-    if keyboard_input.pressed(KeyCode::Right) {
-        direction += Vec3::new(1.0, 0.0, 0.0);
-    }
-    if keyboard_input.pressed(KeyCode::Up) {
-        direction += Vec3::new(0.0, 1.0, 0.0);
-    }
-    if keyboard_input.pressed(KeyCode::Down) {
-        direction += Vec3::new(0.0, -1.0, 0.0);
-    }
-
-    if direction.length() > 0.0 {
-        direction = direction.normalize();
-    }
-
-    player_transform.translation += direction * 200.0 * time.delta_seconds();
-
-    // Clamp player position to game area
-    player_transform.translation.x = player_transform.translation.x.clamp(
-        -WINDOW_WIDTH * 0.45 + 10.0,
-        WINDOW_WIDTH * 0.45 - 10.0,
-    );
-    player_transform.translation.y = player_transform.translation.y.clamp(
-        -WINDOW_HEIGHT * 0.45 + 10.0,
-        WINDOW_HEIGHT * 0.15 - 10.0,
-    );
-}
-
-fn update_score(mut game_state: ResMut<GameState>, mut query: Query<&mut Text>) {
-    // This is a placeholder for score update logic
-    game_state.score += 1;
-    if game_state.score > game_state.high_score {
-        game_state.high_score = game_state.score;
-    }
-
-    for mut text in &mut query {
-        if text.sections[0].value.starts_with("SCORE") {
-            text.sections[0].value = format!("SCORE\n{}", game_state.score);
-        } else if text.sections[0].value.starts_with("HIGH SCORE") {
-            text.sections[0].value = format!("HIGH SCORE\n{}", game_state.high_score);
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = arguments[index].as_str();
+        if option == "--help" || option == "-h" {
+            print_help();
+            return Err("help requested".to_owned());
         }
+        let value = arguments
+            .get(index + 1)
+            .ok_or_else(|| format!("missing value for {option}"))?;
+        match option {
+            "--frames" => {
+                let parsed = parse_positive_usize(value, "--frames")?;
+                frames = Some(parsed);
+            }
+            "--shot-every" => {
+                shot_every = Some(parse_positive_usize(value, "--shot-every")?);
+            }
+            "--out" => output_directory = PathBuf::from(value),
+            "--dump-sfx" => dump_sfx_directory = Some(PathBuf::from(value)),
+            "--seed" => seed = parse_seed(value)?,
+            "--script" => script = Some(PathBuf::from(value)),
+            _ => return Err(format!("unknown headless option: {option}")),
+        }
+        index += 2;
+    }
+
+    Ok(HeadlessOptions {
+        frames: frames.ok_or_else(|| "--frames N is required in headless mode".to_owned())?,
+        shot_every,
+        output_directory,
+        dump_sfx_directory,
+        seed,
+        script,
+    })
+}
+
+fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
+    let number = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid integer for {option}: {value}"))?;
+    if number == 0 {
+        Err(format!("{option} must be greater than zero"))
+    } else {
+        Ok(number)
+    }
+}
+
+fn parse_seed(value: &str) -> Result<u64, String> {
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16)
+    } else {
+        value.parse::<u64>()
+    };
+    parsed.map_err(|_| format!("invalid seed: {value}"))
+}
+
+fn run_headless(options: HeadlessOptions) -> Result<(), String> {
+    if let Some(directory) = &options.dump_sfx_directory {
+        let bank = audio::SfxBank::generate();
+        bank.write_wavs(directory)
+            .map_err(|error| format!("could not dump SFX to {}: {error}", directory.display()))?;
+        println!("generated SFX:");
+        for (name, duration, peak) in bank.metrics() {
+            println!("  {name:<18} {duration:>5.3} s  {:>5.1}% FS", peak * 100.0);
+        }
+    }
+
+    let script = match options.script {
+        Some(path) => parse_script(&path)?,
+        None => Vec::new(),
+    };
+    fs::create_dir_all(&options.output_directory).map_err(|error| {
+        format!(
+            "could not create {}: {error}",
+            options.output_directory.display()
+        )
+    })?;
+
+    let mut simulation = Simulation::new(options.seed);
+    let mut muted = false;
+    let mut previous_mute = false;
+    for frame in 0..options.frames {
+        let input = script_input(&script, frame);
+        if input.mute && !previous_mute {
+            muted = !muted;
+        }
+        previous_mute = input.mute;
+        simulation.tick(input);
+        let capture = match options.shot_every {
+            Some(interval) => frame % interval == 0 || frame + 1 == options.frames,
+            None => frame + 1 == options.frames,
+        };
+        if capture {
+            let path = options
+                .output_directory
+                .join(format!("frame_{frame:05}.png"));
+            let mut display_list = simulation.display_list();
+            if muted {
+                append_muted_indicator(&mut display_list);
+            }
+            headless::write_png(&display_list, &path)
+                .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_script(path: &Path) -> Result<Vec<ScriptRange>, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let mut ranges = Vec::new();
+    for (line_index, raw_line) in contents.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = raw_line.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (range, keys) = line.split_once(':').ok_or_else(|| {
+            format!(
+                "{}:{line_number}: expected START-END: key[,key...]",
+                path.display()
+            )
+        })?;
+        let (start, end) = range.trim().split_once('-').ok_or_else(|| {
+            format!(
+                "{}:{line_number}: expected an inclusive START-END range",
+                path.display()
+            )
+        })?;
+        let start = start
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("{}:{line_number}: invalid start frame", path.display()))?;
+        let end = end
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("{}:{line_number}: invalid end frame", path.display()))?;
+        if start > end {
+            return Err(format!(
+                "{}:{line_number}: range start is after its end",
+                path.display()
+            ));
+        }
+
+        let mut input = InputState::default();
+        for key in keys.split(',').map(str::trim).filter(|key| !key.is_empty()) {
+            match key.to_ascii_lowercase().as_str() {
+                "left" => input.left = true,
+                "right" => input.right = true,
+                "thrust" => input.thrust = true,
+                "fire" => input.fire = true,
+                "start" => input.start = true,
+                "pause" => input.pause = true,
+                "mute" => input.mute = true,
+                "escape" => input.escape = true,
+                _ => {
+                    return Err(format!(
+                        "{}:{line_number}: unknown key {key:?}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        ranges.push(ScriptRange { start, end, input });
+    }
+    Ok(ranges)
+}
+
+fn script_input(ranges: &[ScriptRange], frame: usize) -> InputState {
+    ranges
+        .iter()
+        .filter(|range| frame >= range.start && frame <= range.end)
+        .fold(InputState::default(), |input, range| {
+            input.union(range.input)
+        })
+}
+
+fn window_conf() -> macroquad::conf::Conf {
+    macroquad::conf::Conf {
+        miniquad_conf: macroquad::miniquad::conf::Conf {
+            window_title: "Omega Rust".to_owned(),
+            window_width: VIRTUAL_WIDTH as i32,
+            window_height: VIRTUAL_HEIGHT as i32,
+            window_resizable: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+async fn windowed_main() {
+    use macroquad::prelude::{get_frame_time, is_key_down, is_key_pressed, next_frame, KeyCode};
+
+    let mut simulation = Simulation::persistent(DEFAULT_SEED);
+    let generated_sfx = audio::SfxBank::generate();
+    let mut audio_player = audio::AudioPlayer::load(&generated_sfx)
+        .await
+        .unwrap_or_else(|error| panic!("could not initialise procedural audio: {error}"));
+    let mut renderer = fx::PhosphorRenderer::new()
+        .unwrap_or_else(|error| panic!("could not initialise phosphor renderer: {error}"));
+    let mut accumulator = 0.0_f32;
+    let mut previous_mute = false;
+    let mut fullscreen = false;
+    loop {
+        if is_key_pressed(KeyCode::F) {
+            fullscreen = !fullscreen;
+            macroquad::window::set_fullscreen(fullscreen);
+            if !fullscreen {
+                macroquad::window::request_new_screen_size(
+                    VIRTUAL_WIDTH as f32,
+                    VIRTUAL_HEIGHT as f32,
+                );
+            }
+        }
+        let input = InputState {
+            left: is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
+            right: is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
+            thrust: is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
+            fire: is_key_down(KeyCode::Space),
+            start: is_key_down(KeyCode::Enter),
+            pause: is_key_down(KeyCode::P),
+            mute: is_key_down(KeyCode::M),
+            escape: is_key_down(KeyCode::Escape),
+        };
+        if input.mute && !previous_mute {
+            audio_player.toggle_mute();
+        }
+        previous_mute = input.mute;
+        let frame_seconds = get_frame_time().min(0.25);
+        accumulator += frame_seconds;
+        while accumulator >= TICK_SECONDS {
+            simulation.tick(input);
+            for event in simulation.drain_sfx_events() {
+                audio_player.handle_event(event);
+            }
+            accumulator -= TICK_SECONDS;
+        }
+        audio_player.update(frame_seconds);
+        if simulation.quit_requested() {
+            break;
+        }
+
+        let mut display_list = simulation.display_list();
+        if audio_player.is_muted() {
+            append_muted_indicator(&mut display_list);
+        }
+        renderer.draw(&display_list, frame_seconds);
+        next_frame().await;
+    }
+}
+
+fn append_muted_indicator(display_list: &mut vector::DisplayList) {
+    const HEIGHT: f32 = 17.0;
+    const MARGIN: f32 = 14.0;
+    let width = font::text_width("MUTED", HEIGHT);
+    font::draw_text(
+        display_list,
+        "MUTED",
+        macroquad::math::vec2(VIRTUAL_WIDTH as f32 - MARGIN - width, 738.0),
+        HEIGHT,
+        0.72,
+    );
+}
+
+fn print_help() {
+    println!(
+        "Omega Rust — M4 arcade game\n\
+         \n\
+         USAGE:\n\
+           omega_rust                         Start the windowed game\n\
+           omega_rust --headless --frames N [OPTIONS]\n\
+         \n\
+         HEADLESS OPTIONS:\n\
+           --frames N       Number of fixed 60 Hz simulation frames (required)\n\
+           --shot-every M   Save every Mth frame; default saves only the last\n\
+           --out DIR        PNG directory (default: verify/out)\n\
+           --dump-sfx DIR   Write all synthesized effects as WAV files\n\
+           --seed S         Deterministic decimal or 0x-prefixed seed\n\
+           --script FILE    Input script to run\n\
+         \n\
+         SCRIPT FORMAT:\n\
+           START-END: key[,key...]\n\
+         Ranges are 0-based and inclusive. Keys are left, right, thrust, fire,\n\
+         start, pause, mute, and escape. Matching ranges are combined. Blank lines and text\n\
+         after # are ignored. Example:\n\
+           0-45: thrust,right\n\
+           20-20: fire\n\
+         \n\
+         WINDOW CONTROLS:\n\
+           Left/Right or A/D rotate, Up/W thrust, Space fire, Enter start,\n\
+           P pause, M mute, F fullscreen, Esc back/quit"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{script_input, InputState, ScriptRange};
+
+    #[test]
+    fn overlapping_script_ranges_union_their_keys() {
+        let ranges = [
+            ScriptRange {
+                start: 2,
+                end: 5,
+                input: InputState {
+                    thrust: true,
+                    ..InputState::default()
+                },
+            },
+            ScriptRange {
+                start: 4,
+                end: 4,
+                input: InputState {
+                    fire: true,
+                    ..InputState::default()
+                },
+            },
+        ];
+        let input = script_input(&ranges, 4);
+        assert!(input.thrust && input.fire);
     }
 }

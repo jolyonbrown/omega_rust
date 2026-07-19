@@ -1,0 +1,10 @@
+# Start wave one, turn to face west, and fire into the convoy as it rounds
+# the lower-left bend on the fixed default seed.
+0-0: start
+100-114: left
+360-360: fire
+390-390: fire
+420-420: fire
+450-450: fire
+510-510: fire
+540-540: fire
