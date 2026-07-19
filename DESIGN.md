@@ -68,6 +68,13 @@ deliberately.
   a long-lived Command Ship promotes to a Death Ship. The last surviving enemy
   ship always escalates quickly — waves must never stalemate.
 
+**Difficulty ramp:** Wave *n* uses `t = min((n - 1) / 12, 1)`, with enemy tuning
+lerped from wave 1 to full heat at wave 13: convoy speed 140→205; Command wander
+145–205→190–260, fire 1.6–2.6→0.9–1.6 s, aim error ±10°→±4°, and Vapor Mines
+5.5–8.5→3.8–6.0 s; Death speed/steering 300/230→360/300; enemy bullets
+340→430; Droid Photon Mines 3.2–5.0→2.0–3.2 s; escalation first/repeat
+10/8→6/5 s; and Command-to-Death age 12→8 s. Full heat then holds.
+
 ## 5. Waves, scoring, lives
 
 - Wave *n* spawns `min(4 + n, 10)` Droids as a convoy on the track, moving in a

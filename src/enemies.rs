@@ -5,10 +5,6 @@ use macroquad::math::{vec2, Vec2};
 use crate::vector::Seg;
 
 pub const MINE_CAP: usize = 24;
-pub const DROID_SPEED: f32 = 140.0;
-pub const COMMAND_MIN_FIRE_SECONDS: f32 = 1.6;
-pub const COMMAND_MAX_FIRE_SECONDS: f32 = 2.6;
-pub const DEATH_MAX_SPEED: f32 = 300.0;
 
 const CIRCUIT_LEFT: f32 = 132.0;
 const CIRCUIT_RIGHT: f32 = 892.0;
@@ -140,10 +136,10 @@ pub struct Enemy {
 }
 
 impl Enemy {
-    pub fn droid(path_distance: f32, jitter: f32, direction: f32) -> Self {
+    pub fn droid(path_distance: f32, jitter: f32, direction: f32, speed: f32) -> Self {
         let (position, tangent, normal) = circuit_pose(path_distance);
         let position = position + normal * jitter;
-        let velocity = tangent * direction * DROID_SPEED;
+        let velocity = tangent * direction * speed;
         Self {
             kind: EnemyKind::Droid,
             position,

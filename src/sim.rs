@@ -8,11 +8,10 @@ use std::{
 use macroquad::math::{vec2, Vec2};
 
 use crate::{
-    enemies::{
-        circuit_pose, Enemy, EnemyBullet, EnemyKind, COMMAND_MAX_FIRE_SECONDS,
-        COMMAND_MIN_FIRE_SECONDS, DEATH_MAX_SPEED, DROID_SPEED, MINE_CAP,
+    enemies::{circuit_pose, Enemy, EnemyBullet, EnemyKind, MINE_CAP},
+    game::{
+        is_fleet_bonus_wave, next_extra_ship_threshold, wave_size, Difficulty, GameState, PlayPhase,
     },
-    game::{is_fleet_bonus_wave, next_extra_ship_threshold, wave_size, GameState, PlayPhase},
     hiscore::Storage as HighScoreStorage,
     particles::{self, Particle},
     rng::Rng,
@@ -55,9 +54,6 @@ const FLEET_BONUS_SECONDS: f32 = 2.5;
 const SHIP_DEATH_SECONDS: f32 = 1.5;
 const GAME_OVER_SECONDS: f32 = 7.0;
 const RESPAWN_CLEARANCE: f32 = 140.0;
-const ESCALATION_FIRST_SECONDS: f32 = 10.0;
-const ESCALATION_REPEAT_SECONDS: f32 = 8.0;
-const COMMAND_PROMOTION_SECONDS: f32 = 12.0;
 const LONE_PROMOTION_SECONDS: f32 = 3.0;
 const FLEET_BONUS_POINTS: u32 = 5_000;
 
@@ -167,6 +163,7 @@ pub struct Simulation {
     exhaust_spread: f32,
     state: GameState,
     play_phase: PlayPhase,
+    difficulty: Difficulty,
     phase_timer: f32,
     death_timer: f32,
     game_over_timer: f32,
@@ -209,6 +206,7 @@ impl Simulation {
     }
 
     fn with_high_score(seed: u64, high_score: u32, high_score_storage: HighScoreStorage) -> Self {
+        let difficulty = Difficulty::for_wave(1);
         Self {
             player: spawn_player(),
             shots: Vec::with_capacity(MAX_SHOTS),
@@ -231,11 +229,12 @@ impl Simulation {
             exhaust_spread: 3.0,
             state: GameState::Attract,
             play_phase: PlayPhase::Warning,
+            difficulty,
             phase_timer: 0.0,
             death_timer: 0.0,
             game_over_timer: 0.0,
             wave_age: 0.0,
-            next_escalation: ESCALATION_FIRST_SECONDS,
+            next_escalation: difficulty.escalation_first_seconds,
             mine_drop_timer: 3.4,
             lone_timer: LONE_PROMOTION_SECONDS,
             last_ship_count: 0,
@@ -323,6 +322,15 @@ impl Simulation {
         self.shots.len()
     }
 
+    #[cfg(test)]
+    fn new_at_wave(seed: u64, wave: u32) -> Self {
+        let mut simulation = Self::new(seed);
+        simulation.state = GameState::Playing;
+        simulation.wave = wave.max(1);
+        simulation.spawn_wave();
+        simulation
+    }
+
     fn start_game(&mut self) {
         self.rng = Rng::new(self.seed);
         self.player = spawn_player();
@@ -392,8 +400,11 @@ impl Simulation {
                 if self.phase_timer <= 0.0 {
                     self.play_phase = PlayPhase::Active;
                     self.wave_age = 0.0;
-                    self.next_escalation = ESCALATION_FIRST_SECONDS;
-                    self.mine_drop_timer = self.rng.range_f32(3.2, 4.8);
+                    self.next_escalation = self.difficulty.escalation_first_seconds;
+                    self.mine_drop_timer = self.rng.range_f32(
+                        self.difficulty.droid_initial_mine_min_seconds,
+                        self.difficulty.droid_initial_mine_max_seconds,
+                    );
                 }
             }
             PlayPhase::Active => {
@@ -537,6 +548,7 @@ impl Simulation {
     fn update_enemies(&mut self) {
         let player_position = self.player.position;
         let convoy_direction = self.convoy_direction;
+        let difficulty = self.difficulty;
         let mut new_bullets = Vec::new();
         let mut vapor_mines = Vec::new();
         let mut enemy_bounces = 0;
@@ -546,7 +558,8 @@ impl Simulation {
             match enemy.kind {
                 EnemyKind::PhotonMine | EnemyKind::VaporMine => {}
                 EnemyKind::Droid => {
-                    enemy.path_distance += convoy_direction * DROID_SPEED * TICK_SECONDS;
+                    enemy.path_distance +=
+                        convoy_direction * difficulty.convoy_speed * TICK_SECONDS;
                     let (path_position, tangent, normal) = circuit_pose(enemy.path_distance);
                     let loose_jitter =
                         enemy.jitter + (enemy.age * 1.7 + enemy.wander_phase).sin() * 3.0;
@@ -554,13 +567,16 @@ impl Simulation {
                     enemy.velocity = (next_position - enemy.position) / TICK_SECONDS;
                     enemy.position = next_position;
                     if convoy_direction < 0.0 {
-                        enemy.velocity = -tangent * DROID_SPEED
+                        enemy.velocity = -tangent * difficulty.convoy_speed
                             + normal * (enemy.age * 1.7 + enemy.wander_phase).cos() * 5.1;
                     }
                     enemy.rotation = enemy.velocity.y.atan2(enemy.velocity.x);
                 }
                 EnemyKind::Command => {
-                    let speed = enemy.velocity.length().clamp(145.0, 205.0);
+                    let speed = enemy.velocity.length().clamp(
+                        difficulty.command_wander_min_speed,
+                        difficulty.command_wander_max_speed,
+                    );
                     let steering = (enemy.age * 0.73 + enemy.wander_phase).sin() * 0.52;
                     let angle = enemy.velocity.y.atan2(enemy.velocity.x) + steering * TICK_SECONDS;
                     enemy.velocity = direction(angle) * speed;
@@ -577,18 +593,20 @@ impl Simulation {
 
                     enemy.action_timer -= TICK_SECONDS;
                     if enemy.action_timer <= 0.0 {
-                        let aim_error = self
-                            .rng
-                            .range_f32(-10.0_f32.to_radians(), 10.0_f32.to_radians());
+                        let aim_error = self.rng.range_f32(
+                            -difficulty.command_aim_error_radians,
+                            difficulty.command_aim_error_radians,
+                        );
                         let aim = (player_position - enemy.position).normalize_or_zero();
                         let angle = aim.y.atan2(aim.x) + aim_error;
                         new_bullets.push(EnemyBullet {
                             position: enemy.position + direction(angle) * 15.0,
-                            velocity: direction(angle) * 340.0,
+                            velocity: direction(angle) * difficulty.enemy_bullet_speed,
                         });
-                        enemy.action_timer = self
-                            .rng
-                            .range_f32(COMMAND_MIN_FIRE_SECONDS, COMMAND_MAX_FIRE_SECONDS);
+                        enemy.action_timer = self.rng.range_f32(
+                            difficulty.command_fire_min_seconds,
+                            difficulty.command_fire_max_seconds,
+                        );
                     }
 
                     enemy.mine_timer -= TICK_SECONDS;
@@ -597,13 +615,17 @@ impl Simulation {
                             enemy.position - enemy.velocity.normalize_or_zero() * 18.0,
                             enemy.rotation,
                         ));
-                        enemy.mine_timer = self.rng.range_f32(5.5, 8.5);
+                        enemy.mine_timer = self.rng.range_f32(
+                            difficulty.command_mine_min_seconds,
+                            difficulty.command_mine_max_seconds,
+                        );
                     }
                 }
                 EnemyKind::Death => {
                     let desired = (player_position - enemy.position).normalize_or_zero();
-                    enemy.velocity += desired * 230.0 * TICK_SECONDS;
-                    enemy.velocity = enemy.velocity.clamp_length_max(DEATH_MAX_SPEED);
+                    enemy.velocity +=
+                        desired * difficulty.death_steering_acceleration * TICK_SECONDS;
+                    enemy.velocity = enemy.velocity.clamp_length_max(difficulty.death_max_speed);
                     enemy.position += enemy.velocity * TICK_SECONDS;
                     if resolve_circle_arena(
                         &mut enemy.position,
@@ -637,7 +659,7 @@ impl Simulation {
         self.wave_age += TICK_SECONDS;
         if self.wave_age >= self.next_escalation {
             self.promote_random_droid();
-            self.next_escalation += ESCALATION_REPEAT_SECONDS;
+            self.next_escalation += self.difficulty.escalation_repeat_seconds;
         }
 
         let aged_commands: Vec<usize> = self
@@ -645,7 +667,8 @@ impl Simulation {
             .iter()
             .enumerate()
             .filter_map(|(index, enemy)| {
-                (enemy.kind == EnemyKind::Command && enemy.age >= COMMAND_PROMOTION_SECONDS)
+                (enemy.kind == EnemyKind::Command
+                    && enemy.age >= self.difficulty.command_promotion_seconds)
                     .then_some(index)
             })
             .collect();
@@ -696,11 +719,18 @@ impl Simulation {
         }
         enemy.kind = EnemyKind::Command;
         enemy.age = 0.0;
-        enemy.velocity = enemy.velocity.normalize_or_zero() * 175.0;
-        enemy.action_timer = self
-            .rng
-            .range_f32(COMMAND_MIN_FIRE_SECONDS, COMMAND_MAX_FIRE_SECONDS);
-        enemy.mine_timer = self.rng.range_f32(5.0, 7.0);
+        let wander_speed = (self.difficulty.command_wander_min_speed
+            + self.difficulty.command_wander_max_speed)
+            * 0.5;
+        enemy.velocity = enemy.velocity.normalize_or_zero() * wander_speed;
+        enemy.action_timer = self.rng.range_f32(
+            self.difficulty.command_fire_min_seconds,
+            self.difficulty.command_fire_max_seconds,
+        );
+        enemy.mine_timer = self.rng.range_f32(
+            self.difficulty.command_initial_mine_min_seconds,
+            self.difficulty.command_initial_mine_max_seconds,
+        );
         enemy.wander_phase = self.rng.range_f32(0.0, TAU);
         self.sfx_events.push(SfxEvent::Promote);
     }
@@ -721,7 +751,10 @@ impl Simulation {
         if self.mine_drop_timer > 0.0 {
             return;
         }
-        self.mine_drop_timer = self.rng.range_f32(3.2, 5.0);
+        self.mine_drop_timer = self.rng.range_f32(
+            self.difficulty.droid_mine_min_seconds,
+            self.difficulty.droid_mine_max_seconds,
+        );
         let droids: Vec<usize> = self
             .enemies
             .iter()
@@ -914,6 +947,7 @@ impl Simulation {
     }
 
     fn spawn_wave(&mut self) {
+        self.difficulty = Difficulty::for_wave(self.wave);
         self.enemies.retain(|enemy| enemy.kind.is_mine());
         self.enemy_bullets.clear();
         self.shots.clear();
@@ -922,13 +956,17 @@ impl Simulation {
         for index in 0..count {
             let distance = 72.0 + index as f32 * 58.0;
             let jitter = self.rng.range_f32(-9.0, 9.0);
-            self.enemies
-                .push(Enemy::droid(distance, jitter, self.convoy_direction));
+            self.enemies.push(Enemy::droid(
+                distance,
+                jitter,
+                self.convoy_direction,
+                self.difficulty.convoy_speed,
+            ));
         }
         self.play_phase = PlayPhase::Warning;
         self.phase_timer = SPAWN_WARNING_SECONDS;
         self.wave_age = 0.0;
-        self.next_escalation = ESCALATION_FIRST_SECONDS;
+        self.next_escalation = self.difficulty.escalation_first_seconds;
         self.mine_drop_timer = 3.4;
         self.lone_timer = LONE_PROMOTION_SECONDS;
         self.last_ship_count = count;
@@ -1419,12 +1457,28 @@ mod tests {
         let mut simulation = Simulation::new(11);
         start(&mut simulation);
         simulation.play_phase = PlayPhase::Active;
-        simulation.wave_age = super::ESCALATION_FIRST_SECONDS - TICK_SECONDS * 0.5;
+        simulation.wave_age = simulation.difficulty.escalation_first_seconds - TICK_SECONDS * 0.5;
         simulation.update_escalation();
         assert!(simulation
             .enemies
             .iter()
             .any(|enemy| enemy.kind == EnemyKind::Command));
+    }
+
+    #[test]
+    fn wave_thirteen_simulation_consumes_full_heat_tuning() {
+        let mut simulation = Simulation::new_at_wave(25, 13);
+
+        assert_eq!(simulation.difficulty.heat, 1.0);
+        assert_eq!(simulation.difficulty.convoy_speed, 205.0);
+        assert_eq!(simulation.difficulty.command_fire_min_seconds, 0.9);
+        assert_eq!(simulation.difficulty.command_fire_max_seconds, 1.6);
+        assert!(simulation.difficulty.death_max_speed < super::MAX_SPEED);
+        assert_eq!(simulation.next_escalation, 6.0);
+        assert!((simulation.enemies[0].velocity.length() - 205.0).abs() < 0.0001);
+
+        simulation.promote_to_command(0);
+        assert!((0.9..=1.6).contains(&simulation.enemies[0].action_timer));
     }
 
     #[test]
