@@ -364,7 +364,9 @@ impl Simulation {
         if self.new_high_score {
             self.high_score = self.score;
             if let Some(path) = &self.high_score_path {
-                let _ = hiscore::save(path, self.high_score);
+                if let Err(error) = hiscore::save(path, self.high_score) {
+                    eprintln!("could not save high score to {}: {error}", path.display());
+                }
             }
         }
     }
@@ -441,6 +443,7 @@ impl Simulation {
         if self.ships == 0 {
             self.enter_game_over();
         } else if self.spawn_is_safe() {
+            self.clear_respawn_mines();
             self.player = spawn_player();
             self.state = GameState::Playing;
             self.state_frame = 0;
@@ -496,8 +499,9 @@ impl Simulation {
         let mut flashes = [false; 8];
         let mut fizzles = 0;
         self.shots.retain_mut(|shot| {
+            let previous = shot.position;
             shot.position += shot.velocity * TICK_SECONDS;
-            if let Some(edge) = projectile_collision_edge(shot.position) {
+            if let Some(edge) = projectile_collision_edge(previous, shot.position) {
                 flashes[edge] = true;
                 fizzles += 1;
                 false
@@ -514,8 +518,9 @@ impl Simulation {
         let mut flashes = [false; 8];
         let mut fizzles = 0;
         self.enemy_bullets.retain_mut(|bullet| {
+            let previous = bullet.position;
             bullet.position += bullet.velocity * TICK_SECONDS;
-            if let Some(edge) = projectile_collision_edge(bullet.position) {
+            if let Some(edge) = projectile_collision_edge(previous, bullet.position) {
                 flashes[edge] = true;
                 fizzles += 1;
                 false
@@ -734,6 +739,7 @@ impl Simulation {
     fn try_spawn_mine(&mut self, kind: EnemyKind, position: Vec2, rotation: f32) -> bool {
         if self.mine_count() >= MINE_CAP
             || position.distance(self.player.position) < RESPAWN_CLEARANCE - 20.0
+            || !circle_fits_track(position, kind.radius())
         {
             return false;
         }
@@ -839,6 +845,18 @@ impl Simulation {
                 .all(|bullet| bullet.position.distance(spawn) >= RESPAWN_CLEARANCE)
     }
 
+    fn clear_respawn_mines(&mut self) {
+        let spawn = spawn_position();
+        let old_enemies = mem::take(&mut self.enemies);
+        for enemy in old_enemies {
+            if enemy.kind.is_mine() && enemy.position.distance(spawn) < RESPAWN_CLEARANCE {
+                self.spawn_enemy_shatter(&enemy, 0.35, 28.0);
+            } else {
+                self.enemies.push(enemy);
+            }
+        }
+    }
+
     fn spawn_enemy_shatter(&mut self, enemy: &Enemy, lifetime: f32, energy: f32) {
         particles::spawn_shatter(
             &mut self.particles,
@@ -881,7 +899,7 @@ impl Simulation {
     fn award_points(&mut self, points: u32) {
         self.score = self.score.saturating_add(points);
         self.score_flash = SCORE_FLASH_SECONDS;
-        while self.score >= self.next_extra_ship {
+        while self.next_extra_ship != u32::MAX && self.score >= self.next_extra_ship {
             self.ships = self.ships.saturating_add(1);
             self.sfx_events.push(SfxEvent::ExtraShip);
             self.extra_ship_flash = 2.0;
@@ -973,7 +991,7 @@ impl Simulation {
 
 pub fn reflect_velocity(velocity: Vec2, normal: Vec2, restitution: f32) -> Vec2 {
     let normal = normal.normalize_or_zero();
-    (velocity - 2.0 * velocity.dot(normal) * normal) * restitution
+    velocity - (1.0 + restitution) * velocity.dot(normal) * normal
 }
 
 fn spawn_position() -> Vec2 {
@@ -1103,7 +1121,63 @@ fn resolve_axis_wall(
     false
 }
 
-fn projectile_collision_edge(position: Vec2) -> Option<usize> {
+fn projectile_collision_edge(previous: Vec2, position: Vec2) -> Option<usize> {
+    let walls = [
+        (
+            vec2(OUTER_LEFT, OUTER_TOP),
+            vec2(OUTER_RIGHT, OUTER_TOP),
+            OUTER_TOP_EDGE,
+        ),
+        (
+            vec2(OUTER_RIGHT, OUTER_TOP),
+            vec2(OUTER_RIGHT, OUTER_BOTTOM),
+            OUTER_RIGHT_EDGE,
+        ),
+        (
+            vec2(OUTER_RIGHT, OUTER_BOTTOM),
+            vec2(OUTER_LEFT, OUTER_BOTTOM),
+            OUTER_BOTTOM_EDGE,
+        ),
+        (
+            vec2(OUTER_LEFT, OUTER_BOTTOM),
+            vec2(OUTER_LEFT, OUTER_TOP),
+            OUTER_LEFT_EDGE,
+        ),
+        (
+            vec2(CONSOLE_LEFT, CONSOLE_TOP),
+            vec2(CONSOLE_RIGHT, CONSOLE_TOP),
+            CONSOLE_TOP_EDGE,
+        ),
+        (
+            vec2(CONSOLE_RIGHT, CONSOLE_TOP),
+            vec2(CONSOLE_RIGHT, CONSOLE_BOTTOM),
+            CONSOLE_RIGHT_EDGE,
+        ),
+        (
+            vec2(CONSOLE_RIGHT, CONSOLE_BOTTOM),
+            vec2(CONSOLE_LEFT, CONSOLE_BOTTOM),
+            CONSOLE_BOTTOM_EDGE,
+        ),
+        (
+            vec2(CONSOLE_LEFT, CONSOLE_BOTTOM),
+            vec2(CONSOLE_LEFT, CONSOLE_TOP),
+            CONSOLE_LEFT_EDGE,
+        ),
+    ];
+    if let Some((_, edge)) = walls
+        .into_iter()
+        .filter_map(|(a, b, edge)| {
+            segment_intersection_fraction(previous, position, a, b).map(|time| (time, edge))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+    {
+        return Some(edge);
+    }
+
+    point_collision_edge(position)
+}
+
+fn point_collision_edge(position: Vec2) -> Option<usize> {
     if position.y <= OUTER_TOP {
         return Some(OUTER_TOP_EDGE);
     }
@@ -1134,6 +1208,35 @@ fn projectile_collision_edge(position: Vec2) -> Option<usize> {
             .map(|(_, edge)| edge);
     }
     None
+}
+
+fn segment_intersection_fraction(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Option<f32> {
+    let segment = b - a;
+    let wall = d - c;
+    let denominator = cross(segment, wall);
+    if denominator.abs() <= f32::EPSILON {
+        return None;
+    }
+    let offset = c - a;
+    let time = cross(offset, wall) / denominator;
+    let wall_time = cross(offset, segment) / denominator;
+    ((0.0..=1.0).contains(&time) && (0.0..=1.0).contains(&wall_time)).then_some(time)
+}
+
+fn cross(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+
+fn circle_fits_track(position: Vec2, radius: f32) -> bool {
+    let inside_outer = position.x - radius >= OUTER_LEFT
+        && position.x + radius <= OUTER_RIGHT
+        && position.y - radius >= OUTER_TOP
+        && position.y + radius <= OUTER_BOTTOM;
+    let outside_console = position.x + radius <= CONSOLE_LEFT
+        || position.x - radius >= CONSOLE_RIGHT
+        || position.y + radius <= CONSOLE_TOP
+        || position.y - radius >= CONSOLE_BOTTOM;
+    inside_outer && outside_console
 }
 
 fn segment_circle_hit(a: Vec2, b: Vec2, center: Vec2, radius: f32) -> bool {
@@ -1171,8 +1274,8 @@ mod tests {
     use macroquad::math::vec2;
 
     use super::{
-        reflect_velocity, Enemy, EnemyKind, GameState, InputState, PlayPhase, SfxEvent, Simulation,
-        TICK_SECONDS,
+        reflect_velocity, Enemy, EnemyKind, GameState, InputState, PlayPhase, SfxEvent, Shot,
+        Simulation, TICK_SECONDS,
     };
     use crate::enemies::MINE_CAP;
 
@@ -1185,11 +1288,14 @@ mod tests {
     }
 
     #[test]
-    fn reflection_changes_direction_and_scales_speed_by_restitution() {
+    fn reflection_preserves_tangential_speed_and_damps_only_normal_speed() {
         let velocity = vec2(-30.0, 40.0);
-        let reflected = reflect_velocity(velocity, vec2(1.0, 0.0), 0.9);
-        assert!((reflected - vec2(27.0, 36.0)).length() < 0.0001);
-        assert!((reflected.length() - velocity.length() * 0.9).abs() < 0.0001);
+        let normal = vec2(1.0, 0.0);
+        let tangent = vec2(0.0, 1.0);
+        let restitution = 0.9;
+        let reflected = reflect_velocity(velocity, normal, restitution);
+        assert!((reflected.dot(tangent) - velocity.dot(tangent)).abs() < 0.0001);
+        assert!((reflected.dot(normal) + velocity.dot(normal) * restitution).abs() < 0.0001);
     }
 
     #[test]
@@ -1217,6 +1323,22 @@ mod tests {
             simulation.tick(InputState::default());
         }
         assert_eq!(simulation.shot_count(), 4);
+    }
+
+    #[test]
+    fn shot_sweeping_through_a_console_corner_dies_at_the_wall() {
+        let mut simulation = Simulation::new(21);
+        let position = vec2(247.0, 292.0);
+        let velocity = vec2(720.0, -480.0);
+        let destination = position + velocity * TICK_SECONDS;
+        assert_eq!(super::point_collision_edge(position), None);
+        assert_eq!(super::point_collision_edge(destination), None);
+        simulation.shots.push(Shot { position, velocity });
+
+        simulation.update_shots_walls();
+
+        assert!(simulation.shots.is_empty());
+        assert!(simulation.border_flash[super::CONSOLE_LEFT_EDGE] > 0.0);
     }
 
     #[test]
@@ -1335,6 +1457,62 @@ mod tests {
     }
 
     #[test]
+    fn mine_spawn_requires_the_full_circle_to_fit_inside_the_track() {
+        let mut simulation = Simulation::new(22);
+        start(&mut simulation);
+        simulation.enemies.clear();
+        let radius = EnemyKind::VaporMine.radius();
+
+        assert!(!simulation.try_spawn_mine(
+            EnemyKind::VaporMine,
+            vec2(super::OUTER_LEFT + radius - 0.1, 200.0),
+            0.0,
+        ));
+        assert!(!simulation.try_spawn_mine(
+            EnemyKind::VaporMine,
+            vec2(super::CONSOLE_LEFT - radius + 0.1, 408.0),
+            0.0,
+        ));
+        assert!(simulation.try_spawn_mine(
+            EnemyKind::VaporMine,
+            vec2(super::CONSOLE_LEFT - radius, 408.0),
+            0.0,
+        ));
+    }
+
+    #[test]
+    fn respawn_sweeps_mines_from_the_clearance_zone() {
+        let mut simulation = Simulation::new(23);
+        start(&mut simulation);
+        simulation.enemies.clear();
+        let spawn = super::spawn_position();
+        simulation
+            .enemies
+            .push(Enemy::mine(EnemyKind::PhotonMine, spawn, 0.0));
+
+        simulation.tick(InputState::default());
+        assert_eq!(simulation.state, GameState::ShipDeath);
+        assert_eq!(simulation.ships, 2);
+
+        for _ in 0..100 {
+            simulation.tick(InputState::default());
+            assert!(!simulation.drain_sfx_events().contains(&SfxEvent::MinePop));
+            if simulation.state == GameState::Playing {
+                break;
+            }
+        }
+
+        assert_eq!(simulation.state, GameState::Playing);
+        assert_eq!(simulation.player.position, spawn);
+        assert_eq!(simulation.mine_count(), 0);
+        assert_eq!(simulation.score, 0);
+        for _ in 0..5 {
+            simulation.tick(InputState::default());
+            assert_eq!(simulation.state, GameState::Playing);
+        }
+    }
+
+    #[test]
     fn every_fourth_wave_bonus_awards_points_and_sweeps_mines() {
         for wave in [4, 8, 12] {
             let mut simulation = Simulation::new(14);
@@ -1368,6 +1546,21 @@ mod tests {
     }
 
     #[test]
+    fn saturated_score_stops_awarding_extra_ships() {
+        let mut simulation = Simulation::new(24);
+        start(&mut simulation);
+        simulation.score = u32::MAX - 1;
+        simulation.next_extra_ship = u32::MAX;
+        let ships = simulation.ships;
+
+        simulation.award_points(10);
+
+        assert_eq!(simulation.score, u32::MAX);
+        assert_eq!(simulation.next_extra_ship, u32::MAX);
+        assert_eq!(simulation.ships, ships);
+    }
+
+    #[test]
     fn start_transitions_from_attract_to_playing() {
         let mut simulation = Simulation::new(16);
         assert_eq!(simulation.state, GameState::Attract);
@@ -1379,11 +1572,13 @@ mod tests {
     fn pause_dims_the_scene_and_adds_a_bright_overlay() {
         let mut simulation = Simulation::new(17);
         start(&mut simulation);
-        let running = simulation.display_list();
         simulation.tick(InputState {
             pause: true,
             ..InputState::default()
         });
+        let mut running_simulation = simulation.clone();
+        running_simulation.paused = false;
+        let running = running_simulation.display_list();
         let paused = simulation.display_list();
         assert!(paused.segments.len() > running.segments.len());
         for (before, after) in running.segments.iter().zip(&paused.segments) {

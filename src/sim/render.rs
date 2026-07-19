@@ -1,4 +1,4 @@
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 use macroquad::math::vec2;
 
@@ -20,6 +20,8 @@ use super::{
 const TITLE_SWEEP_SECONDS: f32 = 4.0;
 const INTERSTITIAL_ZOOM_SECONDS: f32 = 0.2;
 const SCORE_NORMAL_INTENSITY: f32 = 0.82;
+const BORDER_IDLE_SHIMMER: f32 = 0.03;
+const BORDER_SHIMMER_FRAMES: u64 = 360;
 
 impl Simulation {
     pub fn display_list(&self) -> DisplayList {
@@ -225,27 +227,6 @@ impl Simulation {
     }
 
     fn draw_arena(&self, display_list: &mut DisplayList) {
-        if self.border_flash.iter().all(|timer| *timer == 0.0) {
-            display_list.closed_polygon(
-                &[
-                    vec2(OUTER_LEFT, OUTER_TOP),
-                    vec2(OUTER_RIGHT, OUTER_TOP),
-                    vec2(OUTER_RIGHT, OUTER_BOTTOM),
-                    vec2(OUTER_LEFT, OUTER_BOTTOM),
-                ],
-                BORDER_IDLE_INTENSITY,
-            );
-            display_list.closed_polygon(
-                &[
-                    vec2(CONSOLE_LEFT, CONSOLE_TOP),
-                    vec2(CONSOLE_RIGHT, CONSOLE_TOP),
-                    vec2(CONSOLE_RIGHT, CONSOLE_BOTTOM),
-                    vec2(CONSOLE_LEFT, CONSOLE_BOTTOM),
-                ],
-                BORDER_IDLE_INTENSITY,
-            );
-            return;
-        }
         let outer = [
             (vec2(OUTER_LEFT, OUTER_TOP), vec2(OUTER_RIGHT, OUTER_TOP)),
             (
@@ -277,7 +258,11 @@ impl Simulation {
             ),
         ];
         for (edge, (a, b)) in outer.into_iter().chain(console).enumerate() {
-            display_list.push_line(a, b, border_intensity(self.border_flash[edge]));
+            display_list.push_line(
+                a,
+                b,
+                border_intensity(self.border_flash[edge], self.frame, edge),
+            );
         }
     }
 
@@ -426,9 +411,12 @@ impl Simulation {
     }
 }
 
-fn border_intensity(timer: f32) -> f32 {
+fn border_intensity(timer: f32, frame: u64, edge: usize) -> f32 {
+    let shimmer_frame = (frame + edge as u64 * 37) % BORDER_SHIMMER_FRAMES;
+    let phase = shimmer_frame as f32 / BORDER_SHIMMER_FRAMES as f32 * TAU;
+    let idle = BORDER_IDLE_INTENSITY + phase.sin() * BORDER_IDLE_SHIMMER;
     let flash = (timer / BORDER_FLASH_SECONDS).clamp(0.0, 1.0);
-    BORDER_IDLE_INTENSITY + (1.0 - BORDER_IDLE_INTENSITY) * flash
+    idle + (1.0 - idle) * flash
 }
 
 fn interstitial_scale(timer: f32, duration: f32) -> f32 {

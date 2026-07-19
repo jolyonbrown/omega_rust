@@ -64,12 +64,12 @@ const B: &[Seg] = &[
 ];
 const C: &[Seg] = &[TOP, UPPER_LEFT, LOWER_LEFT, BOTTOM];
 const D: &[Seg] = &[
-    UPPER_LEFT,
-    LOWER_LEFT,
-    TOP,
-    UPPER_RIGHT,
-    LOWER_RIGHT,
-    BOTTOM,
+    stroke(0.05, 0.0, 0.05, 1.0),
+    stroke(0.05, 0.0, 0.42, 0.0),
+    stroke(0.05, 1.0, 0.42, 1.0),
+    stroke(0.42, 0.0, 0.65, 0.18),
+    stroke(0.65, 0.18, 0.65, 0.82),
+    stroke(0.65, 0.82, 0.42, 1.0),
 ];
 const E: &[Seg] = &[TOP, UPPER_LEFT, MIDDLE, LOWER_LEFT, BOTTOM];
 const F: &[Seg] = &[TOP, UPPER_LEFT, MIDDLE, LOWER_LEFT];
@@ -253,5 +253,12 @@ mod tests {
             let segments = glyph(ch).unwrap_or_else(|| panic!("missing glyph {ch:?}"));
             assert!(!segments.is_empty(), "empty glyph {ch:?}");
         }
+    }
+
+    #[test]
+    fn d_has_a_distinct_segment_set_from_o() {
+        let d = glyph('D').expect("D glyph");
+        let o = glyph('O').expect("O glyph");
+        assert!(d.len() != o.len() || d.iter().any(|segment| !o.contains(segment)));
     }
 }

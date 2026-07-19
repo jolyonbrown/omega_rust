@@ -31,19 +31,6 @@ impl DisplayList {
         self.segments.push(Seg::new(a, b, intensity));
     }
 
-    pub fn polyline(&mut self, points: &[Vec2], intensity: f32) {
-        for pair in points.windows(2) {
-            self.push_line(pair[0], pair[1], intensity);
-        }
-    }
-
-    pub fn closed_polygon(&mut self, points: &[Vec2], intensity: f32) {
-        self.polyline(points, intensity);
-        if points.len() > 2 {
-            self.push_line(points[points.len() - 1], points[0], intensity);
-        }
-    }
-
     /// Appends a local-space shape after applying a uniform scale, rotation,
     /// and translation. Shape and call intensities are multiplied together.
     pub fn shape_at(

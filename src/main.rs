@@ -267,7 +267,7 @@ fn window_conf() -> macroquad::conf::Conf {
 }
 
 async fn windowed_main() {
-    use macroquad::prelude::{get_frame_time, is_key_down, next_frame, KeyCode};
+    use macroquad::prelude::{get_frame_time, is_key_down, is_key_pressed, next_frame, KeyCode};
 
     let mut simulation = Simulation::persistent(DEFAULT_SEED);
     let generated_sfx = audio::SfxBank::generate();
@@ -278,7 +278,18 @@ async fn windowed_main() {
         .unwrap_or_else(|error| panic!("could not initialise phosphor renderer: {error}"));
     let mut accumulator = 0.0_f32;
     let mut previous_mute = false;
+    let mut fullscreen = false;
     loop {
+        if is_key_pressed(KeyCode::F) {
+            fullscreen = !fullscreen;
+            macroquad::window::set_fullscreen(fullscreen);
+            if !fullscreen {
+                macroquad::window::request_new_screen_size(
+                    VIRTUAL_WIDTH as f32,
+                    VIRTUAL_HEIGHT as f32,
+                );
+            }
+        }
         let input = InputState {
             left: is_key_down(KeyCode::Left) || is_key_down(KeyCode::A),
             right: is_key_down(KeyCode::Right) || is_key_down(KeyCode::D),
@@ -355,7 +366,7 @@ fn print_help() {
          \n\
          WINDOW CONTROLS:\n\
            Left/Right or A/D rotate, Up/W thrust, Space fire, Enter start,\n\
-           P pause, M mute, Esc back/quit"
+           P pause, M mute, F fullscreen, Esc back/quit"
     );
 }
 

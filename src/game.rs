@@ -33,7 +33,7 @@ pub const fn next_extra_ship_threshold(score: u32) -> u32 {
     } else if score < 100_000 {
         100_000
     } else {
-        score / 100_000 * 100_000 + 100_000
+        (score / 100_000).saturating_add(1).saturating_mul(100_000)
     }
 }
 
@@ -65,5 +65,7 @@ mod tests {
         assert_eq!(next_extra_ship_threshold(100_000), 200_000);
         assert_eq!(next_extra_ship_threshold(199_999), 200_000);
         assert_eq!(next_extra_ship_threshold(200_000), 300_000);
+        assert_eq!(next_extra_ship_threshold(u32::MAX - 1), u32::MAX);
+        assert_eq!(next_extra_ship_threshold(u32::MAX), u32::MAX);
     }
 }
