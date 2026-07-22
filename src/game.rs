@@ -17,6 +17,7 @@ pub enum PlayPhase {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Difficulty {
     pub(crate) heat: f32,
+    pub(crate) overdrive: f32,
     pub(crate) convoy_speed: f32,
     pub(crate) command_wander_min_speed: f32,
     pub(crate) command_wander_max_speed: f32,
@@ -43,6 +44,7 @@ pub(crate) struct Difficulty {
 
 const WAVE_ONE_DIFFICULTY: Difficulty = Difficulty {
     heat: 0.0,
+    overdrive: 0.0,
     convoy_speed: 140.0,
     command_wander_min_speed: 145.0,
     command_wander_max_speed: 205.0,
@@ -67,6 +69,7 @@ const WAVE_ONE_DIFFICULTY: Difficulty = Difficulty {
 
 const FULL_HEAT_DIFFICULTY: Difficulty = Difficulty {
     heat: 1.0,
+    overdrive: 0.0,
     convoy_speed: 205.0,
     command_wander_min_speed: 190.0,
     command_wander_max_speed: 260.0,
@@ -92,8 +95,10 @@ const FULL_HEAT_DIFFICULTY: Difficulty = Difficulty {
 impl Difficulty {
     pub(crate) fn for_wave(wave: u32) -> Self {
         let heat = (wave.saturating_sub(1) as f32 / 12.0).min(1.0);
-        Self {
+        let overdrive = (wave.saturating_sub(13) as f32 / 12.0).min(1.0);
+        let mut difficulty = Self {
             heat,
+            overdrive,
             convoy_speed: lerp_difficulty(
                 WAVE_ONE_DIFFICULTY.convoy_speed,
                 FULL_HEAT_DIFFICULTY.convoy_speed,
@@ -194,7 +199,51 @@ impl Difficulty {
                 FULL_HEAT_DIFFICULTY.command_promotion_seconds,
                 heat,
             ),
+        };
+        if overdrive > 0.0 {
+            difficulty.convoy_speed =
+                lerp_difficulty(FULL_HEAT_DIFFICULTY.convoy_speed, 220.0, overdrive);
+            difficulty.command_fire_min_seconds = lerp_difficulty(
+                FULL_HEAT_DIFFICULTY.command_fire_min_seconds,
+                0.62,
+                overdrive,
+            );
+            difficulty.command_fire_max_seconds = lerp_difficulty(
+                FULL_HEAT_DIFFICULTY.command_fire_max_seconds,
+                1.15,
+                overdrive,
+            );
+            difficulty.command_aim_error_radians = lerp_difficulty(
+                FULL_HEAT_DIFFICULTY.command_aim_error_radians,
+                2.5_f32.to_radians(),
+                overdrive,
+            );
+            difficulty.enemy_bullet_speed =
+                lerp_difficulty(FULL_HEAT_DIFFICULTY.enemy_bullet_speed, 470.0, overdrive);
+            difficulty.death_max_speed =
+                lerp_difficulty(FULL_HEAT_DIFFICULTY.death_max_speed, 385.0, overdrive);
+            difficulty.death_steering_acceleration = lerp_difficulty(
+                FULL_HEAT_DIFFICULTY.death_steering_acceleration,
+                340.0,
+                overdrive,
+            );
+            difficulty.escalation_first_seconds = lerp_difficulty(
+                FULL_HEAT_DIFFICULTY.escalation_first_seconds,
+                4.0,
+                overdrive,
+            );
+            difficulty.escalation_repeat_seconds = lerp_difficulty(
+                FULL_HEAT_DIFFICULTY.escalation_repeat_seconds,
+                3.5,
+                overdrive,
+            );
+            difficulty.command_promotion_seconds = lerp_difficulty(
+                FULL_HEAT_DIFFICULTY.command_promotion_seconds,
+                6.0,
+                overdrive,
+            );
         }
+        difficulty
     }
 }
 
@@ -209,6 +258,14 @@ fn lerp_difficulty(base: f32, full_heat: f32, heat: f32) -> f32 {
 }
 
 pub const fn wave_size(wave: u32) -> usize {
+    if wave >= 14 {
+        let overdrive_size = 10 + (wave - 13) / 2;
+        return if overdrive_size < 16 {
+            overdrive_size as usize
+        } else {
+            16
+        };
+    }
     let size = 4_u32.saturating_add(wave);
     if size < 10 {
         size as usize
@@ -255,6 +312,7 @@ mod tests {
             Difficulty::for_wave(1),
             Difficulty {
                 heat: 0.0,
+                overdrive: 0.0,
                 convoy_speed: 140.0,
                 command_wander_min_speed: 145.0,
                 command_wander_max_speed: 205.0,
@@ -281,6 +339,7 @@ mod tests {
             Difficulty::for_wave(13),
             Difficulty {
                 heat: 1.0,
+                overdrive: 0.0,
                 convoy_speed: 205.0,
                 command_wander_min_speed: 190.0,
                 command_wander_max_speed: 260.0,
@@ -306,11 +365,57 @@ mod tests {
     }
 
     #[test]
-    fn wave_sizes_start_at_five_and_cap_at_ten() {
+    fn overdrive_ramps_from_wave_thirteen_to_twenty_five_then_holds() {
+        let full_heat = Difficulty::for_wave(13);
+        assert_eq!(full_heat.overdrive, 0.0);
+        assert!(Difficulty::for_wave(14).overdrive > 0.0);
+
+        let full_overdrive = Difficulty::for_wave(25);
+        assert_eq!(full_overdrive.overdrive, 1.0);
+        assert_eq!(full_overdrive.convoy_speed, 220.0);
+        assert_eq!(full_overdrive.command_fire_min_seconds, 0.62);
+        assert_eq!(full_overdrive.command_fire_max_seconds, 1.15);
+        assert_eq!(
+            full_overdrive.command_aim_error_radians,
+            2.5_f32.to_radians()
+        );
+        assert_eq!(full_overdrive.enemy_bullet_speed, 470.0);
+        assert_eq!(full_overdrive.death_max_speed, 385.0);
+        assert_eq!(full_overdrive.death_steering_acceleration, 340.0);
+        assert_eq!(full_overdrive.escalation_first_seconds, 4.0);
+        assert_eq!(full_overdrive.escalation_repeat_seconds, 3.5);
+        assert_eq!(full_overdrive.command_promotion_seconds, 6.0);
+        assert_eq!(Difficulty::for_wave(99), full_overdrive);
+
+        let mut previous = full_heat;
+        for wave in 14..=25 {
+            let current = Difficulty::for_wave(wave);
+            assert!(current.overdrive > previous.overdrive);
+            assert!(current.convoy_speed >= previous.convoy_speed);
+            assert!(current.command_fire_min_seconds <= previous.command_fire_min_seconds);
+            assert!(current.command_fire_max_seconds <= previous.command_fire_max_seconds);
+            assert!(current.command_aim_error_radians <= previous.command_aim_error_radians);
+            assert!(current.enemy_bullet_speed >= previous.enemy_bullet_speed);
+            assert!(current.death_max_speed >= previous.death_max_speed);
+            assert!(current.death_steering_acceleration >= previous.death_steering_acceleration);
+            assert!(current.escalation_first_seconds <= previous.escalation_first_seconds);
+            assert!(current.escalation_repeat_seconds <= previous.escalation_repeat_seconds);
+            assert!(current.command_promotion_seconds <= previous.command_promotion_seconds);
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn wave_sizes_keep_growing_in_overdrive_and_cap_at_sixteen() {
         assert_eq!(wave_size(1), 5);
         assert_eq!(wave_size(2), 6);
         assert_eq!(wave_size(6), 10);
-        assert_eq!(wave_size(99), 10);
+        assert_eq!(wave_size(13), 10);
+        assert_eq!(wave_size(14), 10);
+        assert_eq!(wave_size(15), 11);
+        assert_eq!(wave_size(17), 12);
+        assert_eq!(wave_size(25), 16);
+        assert_eq!(wave_size(99), 16);
     }
 
     #[test]

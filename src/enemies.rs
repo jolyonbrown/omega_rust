@@ -133,6 +133,8 @@ pub struct Enemy {
     pub action_timer: f32,
     pub mine_timer: f32,
     pub wander_phase: f32,
+    pub armed: bool,
+    pub armed_age: f32,
 }
 
 impl Enemy {
@@ -151,6 +153,8 @@ impl Enemy {
             action_timer: 0.0,
             mine_timer: 0.0,
             wander_phase: path_distance * 0.013,
+            armed: false,
+            armed_age: 0.0,
         }
     }
 
@@ -167,6 +171,8 @@ impl Enemy {
             action_timer: 0.0,
             mine_timer: 0.0,
             wander_phase: 0.0,
+            armed: false,
+            armed_age: 0.0,
         }
     }
 }
@@ -175,6 +181,7 @@ impl Enemy {
 pub struct EnemyBullet {
     pub position: Vec2,
     pub velocity: Vec2,
+    pub ttl: Option<f32>,
 }
 
 pub fn circuit_length() -> f32 {

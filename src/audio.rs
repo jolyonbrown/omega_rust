@@ -20,6 +20,8 @@ enum SfxId {
     EnemyExplode,
     PlayerExplode,
     MinePop,
+    MineArm,
+    MineBlast,
     BulletFizzle,
     Promote,
     ExtraShip,
@@ -70,6 +72,8 @@ impl SfxBank {
             clip(SfxId::EnemyExplode, "enemy_explode", enemy_explode()),
             clip(SfxId::PlayerExplode, "player_explode", player_explode()),
             clip(SfxId::MinePop, "mine_pop", mine_pop()),
+            clip(SfxId::MineArm, "mine_arm", mine_arm()),
+            clip(SfxId::MineBlast, "mine_blast", mine_blast()),
             clip(SfxId::BulletFizzle, "bullet_fizzle", bullet_fizzle()),
             clip(SfxId::Promote, "promote", promote()),
             clip(SfxId::ExtraShip, "extra_ship", extra_ship()),
@@ -198,6 +202,8 @@ impl AudioPlayer {
             SfxEvent::EnemyExplode => (SfxId::EnemyExplode, 1.0),
             SfxEvent::PlayerExplode => (SfxId::PlayerExplode, 1.0),
             SfxEvent::MinePop => (SfxId::MinePop, 1.0),
+            SfxEvent::MineArm => (SfxId::MineArm, 1.0),
+            SfxEvent::MineBlast => (SfxId::MineBlast, 1.0),
             SfxEvent::BulletFizzle => (SfxId::BulletFizzle, 0.65),
             SfxEvent::ExtraShip => (SfxId::ExtraShip, 1.0),
             SfxEvent::WaveClear => (SfxId::WaveClear, 1.0),
@@ -389,6 +395,29 @@ impl Synth {
         }
     }
 
+    fn sine(
+        &mut self,
+        start: f32,
+        duration: f32,
+        pitch: PitchSweep,
+        gain: f32,
+        envelope: AmpEnvelope,
+    ) {
+        let start_sample = sample_count(start);
+        let layer_samples = sample_count(duration);
+        let end_sample = (start_sample + layer_samples).min(self.samples.len());
+        let mut phase = 0.0_f32;
+        for (local_sample, output) in self.samples[start_sample..end_sample]
+            .iter_mut()
+            .enumerate()
+        {
+            let time = local_sample as f32 / SAMPLE_RATE as f32;
+            let progress = time / duration;
+            *output += (phase * TAU).sin() * gain * envelope.at(time, duration);
+            phase = (phase + pitch.at(progress) / SAMPLE_RATE as f32).fract();
+        }
+    }
+
     fn noise(
         &mut self,
         start: f32,
@@ -566,6 +595,61 @@ fn mine_pop() -> Vec<i16> {
         env(0.0004, 0.010, 0.4, 0.018),
     );
     synth.finish(0.24)
+}
+
+fn mine_arm() -> Vec<i16> {
+    let total = 0.350;
+    let mut synth = Synth::new(total);
+    for (index, start) in [0.0, 0.070, 0.128, 0.176, 0.216, 0.249, 0.276, 0.298]
+        .into_iter()
+        .enumerate()
+    {
+        synth.square(
+            start,
+            0.026,
+            PitchSweep::exponential(1_650.0 + index as f32 * 55.0, 820.0),
+            1.0,
+            env(0.0002, 0.004, 0.36, 0.009),
+        );
+        synth.noise(
+            start,
+            0.012,
+            PitchSweep::linear(7_200.0, 2_400.0),
+            0.32,
+            env(0.0001, 0.002, 0.24, 0.004),
+            30 + index as u64,
+        );
+    }
+    synth.finish(0.26)
+}
+
+fn mine_blast() -> Vec<i16> {
+    let total = 0.700;
+    let active = active_duration(total);
+    let mut synth = Synth::new(total);
+    synth.sine(
+        0.0,
+        active,
+        PitchSweep::exponential(150.0, 36.0),
+        1.0,
+        env(0.0005, 0.110, 0.58, 0.190),
+    );
+    synth.noise(
+        0.0,
+        active,
+        PitchSweep::exponential(5_200.0, 110.0),
+        0.92,
+        env(0.0004, 0.120, 0.44, 0.210),
+        40,
+    );
+    synth.sine(
+        0.0,
+        0.360,
+        PitchSweep::exponential(78.0, 42.0),
+        0.55,
+        env(0.0005, 0.080, 0.52, 0.120),
+    );
+    synth.finish(0.44)
 }
 
 fn bullet_fizzle() -> Vec<i16> {
@@ -753,6 +837,7 @@ mod tests {
     #[test]
     fn generated_effects_meet_the_signal_contract() {
         let bank = SfxBank::generate();
+        assert_eq!(bank.clips.len(), 18);
         let onset_limit = (SAMPLE_RATE as f32 * 0.005) as usize;
         let tail_samples = (SAMPLE_RATE as f32 * 0.010) as usize;
         let onset_threshold = (i16::MAX as f32 * 0.02) as u16;
@@ -789,6 +874,18 @@ mod tests {
                 clip.name
             );
         }
+    }
+
+    #[test]
+    fn overdrive_mine_clips_have_the_requested_scale() {
+        let bank = SfxBank::generate();
+        let mine_arm = bank.clip(SfxId::MineArm);
+        let mine_blast = bank.clip(SfxId::MineBlast);
+        assert!((mine_arm.duration_seconds() - 0.35).abs() < 0.001);
+        assert!((mine_blast.duration_seconds() - 0.70).abs() < 0.001);
+        assert!(mine_blast.duration_seconds() > bank.clip(SfxId::EnemyExplode).duration_seconds());
+        assert!(mine_blast.peak() > bank.clip(SfxId::EnemyExplode).peak());
+        assert!(mine_blast.peak() < bank.clip(SfxId::PlayerExplode).peak());
     }
 
     #[test]

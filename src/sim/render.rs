@@ -11,10 +11,11 @@ use crate::{
 };
 
 use super::{
-    shape_seg, Simulation, BORDER_FLASH_SECONDS, BORDER_IDLE_INTENSITY, CONSOLE_BOTTOM,
-    CONSOLE_LEFT, CONSOLE_RIGHT, CONSOLE_TOP, ENEMY_BULLET_HALF_LENGTH, FLEET_BONUS_SECONDS,
-    OUTER_BOTTOM, OUTER_LEFT, OUTER_RIGHT, OUTER_TOP, SHIP_SHAPE, SHOT_HALF_LENGTH, TICK_RATE,
-    TICK_SECONDS, WAVE_CLEARED_SECONDS,
+    overdrive_lerp, shape_seg, Simulation, BORDER_FLASH_SECONDS, BORDER_IDLE_INTENSITY,
+    CONSOLE_BOTTOM, CONSOLE_LEFT, CONSOLE_RIGHT, CONSOLE_TOP, ENEMY_BULLET_HALF_LENGTH,
+    FLEET_BONUS_SECONDS, MINE_BLAST_VISUAL_SECONDS, OUTER_BOTTOM, OUTER_LEFT, OUTER_RIGHT,
+    OUTER_TOP, SHIP_SHAPE, SHOT_HALF_LENGTH, SHRAPNEL_HALF_LENGTH, TICK_RATE, TICK_SECONDS,
+    WAVE_CLEARED_SECONDS,
 };
 
 const TITLE_SWEEP_SECONDS: f32 = 4.0;
@@ -82,6 +83,15 @@ impl Simulation {
 
         if self.press_enter_visible() {
             draw_text_centered(display_list, "PRESS ENTER", vec2(512.0, 702.0), 32.0, 0.95);
+        }
+        if self.practice_wave != 1 {
+            draw_text_centered(
+                display_list,
+                &format!("PRACTICE WAVE {}", self.practice_wave),
+                vec2(512.0, 660.0),
+                20.0,
+                0.78,
+            );
         }
     }
 
@@ -157,6 +167,7 @@ impl Simulation {
         self.draw_enemies(display_list);
         self.draw_shots(display_list);
         self.draw_enemy_bullets(display_list);
+        self.draw_mine_blasts(display_list);
         particles::draw(&self.particles, display_list);
         if self.state == GameState::Playing {
             self.draw_player(display_list);
@@ -167,6 +178,7 @@ impl Simulation {
     fn draw_game_over(&self, display_list: &mut DisplayList) {
         self.draw_arena(display_list);
         self.draw_console_contents(display_list);
+        self.draw_mine_blasts(display_list);
         particles::draw(&self.particles, display_list);
         draw_text_centered(display_list, "GAME OVER", vec2(512.0, 112.0), 66.0, 1.0);
         draw_text_centered(
@@ -277,11 +289,19 @@ impl Simulation {
         );
         draw_text_centered(
             display_list,
-            &self.high_score.max(self.score).to_string(),
+            &if self.practice_run {
+                self.high_score
+            } else {
+                self.high_score.max(self.score)
+            }
+            .to_string(),
             vec2(center_x, 348.0),
             22.0,
             0.82,
         );
+        if self.practice_run {
+            draw_text_centered(display_list, "PRACTICE", vec2(center_x, 378.0), 14.0, 0.62);
+        }
         draw_text_centered(
             display_list,
             &self.score.to_string(),
@@ -328,18 +348,33 @@ impl Simulation {
                     if warning_bright { 0.28 } else { 0.12 },
                 );
             } else {
-                let rotation = if enemy.kind == EnemyKind::VaporMine {
-                    enemy.rotation + enemy.age * 0.28
-                } else {
-                    enemy.rotation
-                };
-                display_list.shape_at(
-                    enemy.kind.shape(),
-                    enemy.position,
-                    rotation,
-                    1.0,
-                    enemy.kind.intensity(enemy.age),
-                );
+                let (position, rotation, intensity) =
+                    if enemy.kind == EnemyKind::VaporMine && enemy.armed {
+                        let shake = vec2(
+                            (enemy.armed_age * 53.0).sin(),
+                            (enemy.armed_age * 47.0).cos(),
+                        ) * 2.5;
+                        let spin = overdrive_lerp(6.0, 10.0, self.difficulty.overdrive);
+                        let flicker = (enemy.armed_age * TAU / 0.14).sin() * 0.5 + 0.5;
+                        (
+                            enemy.position + shake,
+                            enemy.rotation + enemy.armed_age * spin,
+                            0.82 + flicker * 0.18,
+                        )
+                    } else if enemy.kind == EnemyKind::VaporMine {
+                        (
+                            enemy.position,
+                            enemy.rotation + enemy.age * 0.28,
+                            enemy.kind.intensity(enemy.age),
+                        )
+                    } else {
+                        (
+                            enemy.position,
+                            enemy.rotation,
+                            enemy.kind.intensity(enemy.age),
+                        )
+                    };
+                display_list.shape_at(enemy.kind.shape(), position, rotation, 1.0, intensity);
             }
         }
     }
@@ -402,11 +437,44 @@ impl Simulation {
     fn draw_enemy_bullets(&self, display_list: &mut DisplayList) {
         for bullet in &self.enemy_bullets {
             let direction = bullet.velocity.normalize_or_zero();
+            let (half_length, intensity) = if bullet.ttl.is_some() {
+                (SHRAPNEL_HALF_LENGTH, 1.0)
+            } else {
+                (ENEMY_BULLET_HALF_LENGTH, 0.96)
+            };
             display_list.push_line(
-                bullet.position - direction * ENEMY_BULLET_HALF_LENGTH,
-                bullet.position + direction * ENEMY_BULLET_HALF_LENGTH,
-                0.96,
+                bullet.position - direction * half_length,
+                bullet.position + direction * half_length,
+                intensity,
             );
+        }
+    }
+
+    fn draw_mine_blasts(&self, display_list: &mut DisplayList) {
+        const SEGMENTS: usize = 24;
+        for blast in &self.mine_blasts {
+            let progress = (blast.age / MINE_BLAST_VISUAL_SECONDS).clamp(0.0, 1.0);
+            let expansion = progress * progress * (3.0 - 2.0 * progress);
+            let fade = 1.0 - progress;
+            for (ring, scale) in [1.0_f32, 0.82].into_iter().enumerate() {
+                let point = |index: usize| {
+                    let angle = TAU * index as f32 / SEGMENTS as f32;
+                    let roughness = 1.0 + (index as f32 * 2.37 + ring as f32).sin() * 0.025;
+                    blast.position
+                        + vec2(angle.cos(), angle.sin())
+                            * blast.radius
+                            * expansion
+                            * scale
+                            * roughness
+                };
+                for index in 0..SEGMENTS {
+                    display_list.push_line(
+                        point(index),
+                        point((index + 1) % SEGMENTS),
+                        fade * if ring == 0 { 1.0 } else { 0.62 },
+                    );
+                }
+            }
         }
     }
 }

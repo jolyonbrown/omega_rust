@@ -58,7 +58,7 @@ deliberately.
 |---|---|---|
 | Photon Mine | 350 | Small static diamond, dropped behind Droids. Deadly to touch. |
 | Vapor Mine | 500 | Larger pulsing X, laid by Command Ships. Deadly to touch. |
-| Droid Ship | 1000 | Convoy: orbits the track in loose formation, drops Photon Mines. Doesn't fire. |
+| Droid Ship | 1000 | Convoy: orbits the track in loose formation, drops Photon Mines. Returns fire only in overdrive. |
 | Command Ship | 1500 | Evolved Droid: breaks formation, fires aimed photon bullets (with spread), lays Vapor Mines. |
 | Death Ship | 2500 | Evolved Command: fast, hunts the player directly. Doesn't fire — it *is* the bullet. |
 
@@ -73,13 +73,51 @@ lerped from wave 1 to full heat at wave 13: convoy speed 140→205; Command wand
 145–205→190–260, fire 1.6–2.6→0.9–1.6 s, aim error ±10°→±4°, and Vapor Mines
 5.5–8.5→3.8–6.0 s; Death speed/steering 300/230→360/300; enemy bullets
 340→430; Droid Photon Mines 3.2–5.0→2.0–3.2 s; escalation first/repeat
-10/8→6/5 s; and Command-to-Death age 12→8 s. Full heat then holds.
+10/8→6/5 s; and Command-to-Death age 12→8 s. Full heat holds through wave 13.
+
+### Overdrive (waves 14+)
+
+After full heat, `u = clamp((wave - 13) / 12, 0, 1)` drives a second ramp which
+reaches its cap at wave 25. The wave 1–13 simulation and RNG stream remain exactly
+the full-heat design above.
+
+| Parameter | Wave 13 (`u=0`) | Wave 25+ (`u=1`) |
+|---|---:|---:|
+| Convoy orbit speed | 205 | 220 |
+| Command fire interval | 0.9–1.6 s | 0.62–1.15 s |
+| Command aim error | ±4° | ±2.5° |
+| Enemy bullet speed | 430 | 470 |
+| Death Ship max speed / steering | 360 / 300 | 385 / 340 |
+| Escalation first / repeat | 6 / 5 s | 4 / 3.5 s |
+| Command-to-Death age | 8 s | 6 s |
+
+Overdrive convoys grow from 10 ships at wave 14 to 16 at wave 25. A fleet-level
+timer lets a random Droid return fire: 3.6–5.4 s tightening to 1.5–2.6 s, with
+±16°→±9° spread and bullets at 85% of standard enemy-bullet speed. Command wander,
+mine-drop intervals and cap, lone-survivor timing, player physics, scoring, and
+fleet-bonus rhythm never ramp beyond their wave-13 values.
+
+Vapor Mines become proximity weapons throughout overdrive, including mines carried
+from wave 13. At 70→100 units they arm with a 0.9→0.65 s fuse, ratcheting sound,
+fast spin, shake, and bright flicker. Shooting one still safely defuses it for 500
+points. Detonation produces a 60→110-unit blast: the player is killed through the
+normal death path, ships and Photon Mines shatter for their normal points, and
+nearby Vapor Mines chain-arm on a random 0.12–0.30 s stagger. The blast is drawn as
+expanding rough vector rings plus a particle burst. From `u >= 0.3`, it also throws
+3→6 evenly spaced, randomly rotated shrapnel streaks which kill the player and
+expire after 0.7 s or on wall contact. Newly laid Vapor Mines drift at 12→40 u/s,
+reflecting perfectly from the arena and console; older Vapor Mines and all Photon
+Mines remain static. Mine fuses freeze outside active play and during ShipDeath.
+The attract-screen `W` selector cycles practice starts through waves 1, 14, 17,
+21, and 25; practice runs are labelled and never write the high score. Headless
+captures can start directly at a chosen wave with `--wave N`.
 
 ## 5. Waves, scoring, lives
 
-- Wave *n* spawns `min(4 + n, 10)` Droids as a convoy on the track, moving in a
-  randomly chosen direction (clockwise/counter). Brief spawn-in warning so the
-  player is never ambushed.
+- Through wave 13, wave *n* spawns `min(4 + n, 10)` Droids. From wave 14 onward it
+  spawns `10 + min((n - 13) / 2, 6)` using integer division, capped at 16. The
+  convoy moves in a randomly chosen direction (clockwise/counter), with a brief
+  spawn-in warning so the player is never ambushed.
 - Wave cleared when all *ships* are destroyed. Mines persist across waves
   (the track gets meaner) — but every 4th wave cleared awards the
   **FLEET BONUS: 5000** and sweeps all mines clean. That's the game's breathing
@@ -100,7 +138,8 @@ lerped from wave 1 to full heat at wave 13: convoy speed 140→205; Command wand
 
 ## 7. Controls
 
-Left/Right or A/D rotate · Up or W thrust · Space fire · Enter start ·
+Left/Right or A/D rotate · Up or W thrust · W cycles practice wave on Attract ·
+Space fire · Enter start ·
 P pause · M mute · F fullscreen · Esc back/quit.
 
 ## 8. Audio direction
@@ -126,7 +165,7 @@ the CPU wrote a display list and the X-Y monitor drew it.
   post-pass (render-to-texture, blurred additive re-composite) and beam variance.
 - Sink B — **headless** (pure CPU): rasterizes the display list to PNG with no
   window, no GPU, no X server. CLI:
-  `omega_rust --headless --frames N --shot-every M --out DIR [--seed S] [--script FILE]`
+  `omega_rust --headless --frames N --shot-every M --out DIR [--seed S] [--wave N] [--script FILE]`
   where the script feeds deterministic per-frame inputs. This is the automated
   visual-verification harness — agents check their own work by generating frames
   and reading the PNGs.

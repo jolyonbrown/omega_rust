@@ -64,6 +64,7 @@ struct HeadlessOptions {
     dump_sfx_directory: Option<PathBuf>,
     seed: u64,
     script: Option<PathBuf>,
+    wave: Option<u32>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -82,6 +83,7 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
     let mut dump_sfx_directory = None;
     let mut seed = DEFAULT_SEED;
     let mut script = None;
+    let mut wave = None;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -105,6 +107,7 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
             "--dump-sfx" => dump_sfx_directory = Some(PathBuf::from(value)),
             "--seed" => seed = parse_seed(value)?,
             "--script" => script = Some(PathBuf::from(value)),
+            "--wave" => wave = Some(parse_positive_u32(value, "--wave")?),
             _ => return Err(format!("unknown headless option: {option}")),
         }
         index += 2;
@@ -117,6 +120,7 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
         dump_sfx_directory,
         seed,
         script,
+        wave,
     })
 }
 
@@ -124,6 +128,18 @@ fn parse_headless_options(arguments: &[String]) -> Result<HeadlessOptions, Strin
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
     let number = value
         .parse::<usize>()
+        .map_err(|_| format!("invalid integer for {option}: {value}"))?;
+    if number == 0 {
+        Err(format!("{option} must be greater than zero"))
+    } else {
+        Ok(number)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_positive_u32(value: &str, option: &str) -> Result<u32, String> {
+    let number = value
+        .parse::<u32>()
         .map_err(|_| format!("invalid integer for {option}: {value}"))?;
     if number == 0 {
         Err(format!("{option} must be greater than zero"))
@@ -168,7 +184,10 @@ fn run_headless(options: HeadlessOptions) -> Result<(), String> {
         )
     })?;
 
-    let mut simulation = Simulation::new(options.seed);
+    let mut simulation = options.wave.map_or_else(
+        || Simulation::new(options.seed),
+        |wave| Simulation::new_at_wave(options.seed, wave),
+    );
     let mut muted = false;
     let mut previous_mute = false;
     for frame in 0..options.frames {
@@ -243,6 +262,7 @@ fn parse_script(path: &Path) -> Result<Vec<ScriptRange>, String> {
                 "thrust" => input.thrust = true,
                 "fire" => input.fire = true,
                 "start" => input.start = true,
+                "wave" => input.wave_select = true,
                 "pause" => input.pause = true,
                 "mute" => input.mute = true,
                 "escape" => input.escape = true,
@@ -326,6 +346,7 @@ async fn windowed_main() {
             thrust: is_key_down(KeyCode::Up) || is_key_down(KeyCode::W),
             fire: is_key_down(KeyCode::Space),
             start: is_key_down(KeyCode::Enter),
+            wave_select: is_key_down(KeyCode::W),
             pause: is_key_down(KeyCode::P),
             mute: is_key_down(KeyCode::M),
             escape: is_key_down(KeyCode::Escape),
@@ -385,18 +406,20 @@ fn print_help() {
            --out DIR        PNG directory (default: verify/out)\n\
            --dump-sfx DIR   Write all synthesized effects as WAV files\n\
            --seed S         Deterministic decimal or 0x-prefixed seed\n\
+           --wave N         Start play immediately at wave N\n\
            --script FILE    Input script to run\n\
          \n\
          SCRIPT FORMAT:\n\
            START-END: key[,key...]\n\
          Ranges are 0-based and inclusive. Keys are left, right, thrust, fire,\n\
-         start, pause, mute, and escape. Matching ranges are combined. Blank lines and text\n\
+         start, wave, pause, mute, and escape. Matching ranges are combined. Blank lines and text\n\
          after # are ignored. Example:\n\
            0-45: thrust,right\n\
            20-20: fire\n\
          \n\
          WINDOW CONTROLS:\n\
            Left/Right or A/D rotate, Up/W thrust, Space fire, Enter start,\n\
+           W cycles practice waves on the attract screen,\n\
            P pause, M mute, F fullscreen, Esc back/quit"
     );
 }
@@ -421,11 +444,12 @@ mod tests {
                 end: 4,
                 input: InputState {
                     fire: true,
+                    wave_select: true,
                     ..InputState::default()
                 },
             },
         ];
         let input = script_input(&ranges, 4);
-        assert!(input.thrust && input.fire);
+        assert!(input.thrust && input.fire && input.wave_select);
     }
 }

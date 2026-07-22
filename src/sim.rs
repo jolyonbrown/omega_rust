@@ -43,6 +43,7 @@ const SHIP_RADIUS: f32 = 10.0;
 const SHOT_SPEED: f32 = 900.0;
 const SHOT_HALF_LENGTH: f32 = 5.5;
 const ENEMY_BULLET_HALF_LENGTH: f32 = 5.0;
+const SHRAPNEL_HALF_LENGTH: f32 = 7.5;
 const MAX_SHOTS: usize = 4;
 const BORDER_FLASH_SECONDS: f32 = 0.3;
 const BORDER_NEIGHBOUR_FLASH_STRENGTH: f32 = 0.3;
@@ -56,6 +57,11 @@ const GAME_OVER_SECONDS: f32 = 7.0;
 const RESPAWN_CLEARANCE: f32 = 140.0;
 const LONE_PROMOTION_SECONDS: f32 = 3.0;
 const FLEET_BONUS_POINTS: u32 = 5_000;
+const DROID_BULLET_SPEED_SCALE: f32 = 0.85;
+const MINE_CHAIN_FUSE_MIN_SECONDS: f32 = 0.12;
+const MINE_CHAIN_FUSE_MAX_SECONDS: f32 = 0.30;
+const MINE_BLAST_VISUAL_SECONDS: f32 = 0.4;
+const SHRAPNEL_LIFETIME_SECONDS: f32 = 0.7;
 
 const OUTER_TOP_EDGE: usize = 0;
 const OUTER_RIGHT_EDGE: usize = 1;
@@ -86,6 +92,7 @@ pub struct InputState {
     pub thrust: bool,
     pub fire: bool,
     pub start: bool,
+    pub wave_select: bool,
     pub pause: bool,
     pub mute: bool,
     pub escape: bool,
@@ -99,6 +106,8 @@ pub enum SfxEvent {
     EnemyExplode,
     PlayerExplode,
     MinePop,
+    MineArm,
+    MineBlast,
     BulletFizzle,
     ExtraShip,
     WaveClear,
@@ -119,6 +128,7 @@ impl InputState {
             thrust: self.thrust || other.thrust,
             fire: self.fire || other.fire,
             start: self.start || other.start,
+            wave_select: self.wave_select || other.wave_select,
             pause: self.pause || other.pause,
             mute: self.mute || other.mute,
             escape: self.escape || other.escape,
@@ -140,6 +150,13 @@ pub struct Shot {
     pub velocity: Vec2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MineBlastVisual {
+    position: Vec2,
+    radius: f32,
+    age: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Simulation {
     pub player: Player,
@@ -147,6 +164,7 @@ pub struct Simulation {
     enemies: Vec<Enemy>,
     enemy_bullets: Vec<EnemyBullet>,
     particles: Vec<Particle>,
+    mine_blasts: Vec<MineBlastVisual>,
     border_flash: [f32; 8],
     rng: Rng,
     seed: u64,
@@ -154,6 +172,7 @@ pub struct Simulation {
     state_frame: u64,
     previous_fire: bool,
     previous_start: bool,
+    previous_wave_select: bool,
     previous_pause: bool,
     previous_escape: bool,
     paused: bool,
@@ -170,6 +189,7 @@ pub struct Simulation {
     wave_age: f32,
     next_escalation: f32,
     mine_drop_timer: f32,
+    droid_fire_timer: f32,
     lone_timer: f32,
     last_ship_count: usize,
     convoy_direction: f32,
@@ -178,6 +198,8 @@ pub struct Simulation {
     high_score: u32,
     ships: u32,
     wave: u32,
+    practice_wave: u32,
+    practice_run: bool,
     next_extra_ship: u32,
     extra_ship_flash: f32,
     new_high_score: bool,
@@ -213,6 +235,7 @@ impl Simulation {
             enemies: Vec::new(),
             enemy_bullets: Vec::new(),
             particles: Vec::new(),
+            mine_blasts: Vec::new(),
             border_flash: [0.0; 8],
             rng: Rng::new(seed),
             seed,
@@ -220,6 +243,7 @@ impl Simulation {
             state_frame: 0,
             previous_fire: false,
             previous_start: false,
+            previous_wave_select: false,
             previous_pause: false,
             previous_escape: false,
             paused: false,
@@ -236,6 +260,7 @@ impl Simulation {
             wave_age: 0.0,
             next_escalation: difficulty.escalation_first_seconds,
             mine_drop_timer: 3.4,
+            droid_fire_timer: 0.0,
             lone_timer: LONE_PROMOTION_SECONDS,
             last_ship_count: 0,
             convoy_direction: 1.0,
@@ -244,6 +269,8 @@ impl Simulation {
             high_score,
             ships: 3,
             wave: 1,
+            practice_wave: 1,
+            practice_run: false,
             next_extra_ship: 40_000,
             extra_ship_flash: 0.0,
             new_high_score: false,
@@ -257,10 +284,12 @@ impl Simulation {
     pub fn tick(&mut self, input: InputState) {
         self.sfx_events.clear();
         let start_pressed = input.start && !self.previous_start;
+        let wave_select_pressed = input.wave_select && !self.previous_wave_select;
         let pause_pressed = input.pause && !self.previous_pause;
         let escape_pressed = input.escape && !self.previous_escape;
 
         self.previous_start = input.start;
+        self.previous_wave_select = input.wave_select;
         self.previous_pause = input.pause;
         self.previous_escape = input.escape;
 
@@ -270,6 +299,16 @@ impl Simulation {
             } else {
                 self.enter_attract();
             }
+        }
+
+        if wave_select_pressed && self.state == GameState::Attract {
+            self.practice_wave = match self.practice_wave {
+                1 => 14,
+                14 => 17,
+                17 => 21,
+                21 => 25,
+                _ => 1,
+            };
         }
 
         if start_pressed {
@@ -302,6 +341,7 @@ impl Simulation {
             GameState::ShipDeath => self.update_ship_death(),
             GameState::GameOver => self.update_game_over(),
         }
+        self.update_mine_blast_visuals();
         self.update_convoy_tick();
 
         self.previous_fire = input.fire;
@@ -322,12 +362,11 @@ impl Simulation {
         self.shots.len()
     }
 
-    #[cfg(test)]
-    fn new_at_wave(seed: u64, wave: u32) -> Self {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_at_wave(seed: u64, wave: u32) -> Self {
         let mut simulation = Self::new(seed);
-        simulation.state = GameState::Playing;
-        simulation.wave = wave.max(1);
-        simulation.spawn_wave();
+        simulation.practice_wave = wave.max(1);
+        simulation.start_game();
         simulation
     }
 
@@ -338,6 +377,7 @@ impl Simulation {
         self.enemies.clear();
         self.enemy_bullets.clear();
         self.particles.clear();
+        self.mine_blasts.clear();
         self.border_flash = [0.0; 8];
         self.state = GameState::Playing;
         self.state_frame = 0;
@@ -346,7 +386,8 @@ impl Simulation {
         self.score = 0;
         self.score_flash = 0.0;
         self.ships = 3;
-        self.wave = 1;
+        self.wave = self.practice_wave;
+        self.practice_run = self.practice_wave != 1;
         self.next_extra_ship = 40_000;
         self.extra_ship_flash = 0.0;
         self.new_high_score = false;
@@ -362,6 +403,7 @@ impl Simulation {
         self.enemies.clear();
         self.enemy_bullets.clear();
         self.particles.clear();
+        self.mine_blasts.clear();
     }
 
     fn enter_game_over(&mut self) {
@@ -373,7 +415,7 @@ impl Simulation {
         self.shots.clear();
         self.enemies.clear();
         self.enemy_bullets.clear();
-        self.new_high_score = self.score > self.high_score;
+        self.new_high_score = !self.practice_run && self.score > self.high_score;
         if self.new_high_score {
             self.high_score = self.score;
             self.high_score_storage.save(self.high_score);
@@ -414,7 +456,9 @@ impl Simulation {
                 self.update_enemy_bullets();
                 self.update_escalation();
                 self.update_droid_mine_drop();
+                self.update_droid_fire();
                 self.handle_combat();
+                self.update_proximity_mines();
                 if self.state == GameState::Playing && self.ship_count() == 0 {
                     self.complete_wave();
                 }
@@ -494,6 +538,7 @@ impl Simulation {
             &mut self.player.velocity,
             SHIP_RADIUS,
             &mut self.border_flash,
+            RESTITUTION,
         ) {
             self.sfx_events.push(SfxEvent::Bounce);
         }
@@ -532,6 +577,12 @@ impl Simulation {
         self.enemy_bullets.retain_mut(|bullet| {
             let previous = bullet.position;
             bullet.position += bullet.velocity * TICK_SECONDS;
+            if let Some(ttl) = &mut bullet.ttl {
+                *ttl -= TICK_SECONDS;
+                if *ttl <= 0.0 {
+                    return false;
+                }
+            }
             if let Some(edge) = projectile_collision_edge(previous, bullet.position) {
                 flashes[edge] = true;
                 fizzles += 1;
@@ -556,7 +607,19 @@ impl Simulation {
         for enemy in &mut self.enemies {
             enemy.age += TICK_SECONDS;
             match enemy.kind {
-                EnemyKind::PhotonMine | EnemyKind::VaporMine => {}
+                EnemyKind::PhotonMine => {}
+                EnemyKind::VaporMine => {
+                    if difficulty.overdrive > 0.0 && enemy.velocity != Vec2::ZERO {
+                        enemy.position += enemy.velocity * TICK_SECONDS;
+                        resolve_circle_arena(
+                            &mut enemy.position,
+                            &mut enemy.velocity,
+                            enemy.kind.radius(),
+                            &mut self.border_flash,
+                            1.0,
+                        );
+                    }
+                }
                 EnemyKind::Droid => {
                     enemy.path_distance +=
                         convoy_direction * difficulty.convoy_speed * TICK_SECONDS;
@@ -586,6 +649,7 @@ impl Simulation {
                         &mut enemy.velocity,
                         enemy.kind.radius(),
                         &mut self.border_flash,
+                        RESTITUTION,
                     ) {
                         enemy_bounces += 1;
                     }
@@ -602,6 +666,7 @@ impl Simulation {
                         new_bullets.push(EnemyBullet {
                             position: enemy.position + direction(angle) * 15.0,
                             velocity: direction(angle) * difficulty.enemy_bullet_speed,
+                            ttl: None,
                         });
                         enemy.action_timer = self.rng.range_f32(
                             difficulty.command_fire_min_seconds,
@@ -632,6 +697,7 @@ impl Simulation {
                         &mut enemy.velocity,
                         enemy.kind.radius(),
                         &mut self.border_flash,
+                        RESTITUTION,
                     ) {
                         enemy_bounces += 1;
                     }
@@ -770,6 +836,61 @@ impl Simulation {
         self.try_spawn_mine(EnemyKind::PhotonMine, position, droid.rotation);
     }
 
+    fn update_droid_fire(&mut self) {
+        if self.difficulty.overdrive <= 0.0
+            || self.state != GameState::Playing
+            || self.play_phase != PlayPhase::Active
+        {
+            return;
+        }
+        let droids: Vec<usize> = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, enemy)| (enemy.kind == EnemyKind::Droid).then_some(index))
+            .collect();
+        if droids.is_empty() {
+            return;
+        }
+
+        self.droid_fire_timer -= TICK_SECONDS;
+        if self.droid_fire_timer > 0.0 {
+            return;
+        }
+
+        let choice = self.rng.next_u64() as usize % droids.len();
+        let droid = &self.enemies[droids[choice]];
+        let aim_error = self.rng.range_f32(
+            -overdrive_lerp(
+                16.0_f32.to_radians(),
+                9.0_f32.to_radians(),
+                self.difficulty.overdrive,
+            ),
+            overdrive_lerp(
+                16.0_f32.to_radians(),
+                9.0_f32.to_radians(),
+                self.difficulty.overdrive,
+            ),
+        );
+        let aim = (self.player.position - droid.position).normalize_or_zero();
+        let angle = aim.y.atan2(aim.x) + aim_error;
+        self.enemy_bullets.push(EnemyBullet {
+            position: droid.position + direction(angle) * 15.0,
+            velocity: direction(angle)
+                * self.difficulty.enemy_bullet_speed
+                * DROID_BULLET_SPEED_SCALE,
+            ttl: None,
+        });
+        self.droid_fire_timer = self.random_droid_fire_interval();
+    }
+
+    fn random_droid_fire_interval(&mut self) -> f32 {
+        self.rng.range_f32(
+            overdrive_lerp(3.6, 1.5, self.difficulty.overdrive),
+            overdrive_lerp(5.4, 2.6, self.difficulty.overdrive),
+        )
+    }
+
     fn try_spawn_mine(&mut self, kind: EnemyKind, position: Vec2, rotation: f32) -> bool {
         if self.mine_count() >= MINE_CAP
             || position.distance(self.player.position) < RESPAWN_CLEARANCE - 20.0
@@ -777,8 +898,134 @@ impl Simulation {
         {
             return false;
         }
-        self.enemies.push(Enemy::mine(kind, position, rotation));
+        let mut mine = Enemy::mine(kind, position, rotation);
+        if kind == EnemyKind::VaporMine && self.difficulty.overdrive > 0.0 {
+            let heading = self.rng.range_f32(0.0, TAU);
+            let speed = overdrive_lerp(12.0, 40.0, self.difficulty.overdrive);
+            mine.velocity = direction(heading) * speed;
+        }
+        self.enemies.push(mine);
         true
+    }
+
+    fn update_proximity_mines(&mut self) {
+        if self.difficulty.overdrive <= 0.0
+            || self.state != GameState::Playing
+            || self.play_phase != PlayPhase::Active
+        {
+            return;
+        }
+
+        let trigger_radius = overdrive_lerp(70.0, 100.0, self.difficulty.overdrive);
+        let fuse_seconds = overdrive_lerp(0.9, 0.65, self.difficulty.overdrive);
+        for enemy in &mut self.enemies {
+            if enemy.kind == EnemyKind::VaporMine
+                && !enemy.armed
+                && enemy.position.distance(self.player.position) <= trigger_radius
+            {
+                enemy.armed = true;
+                enemy.armed_age = 0.0;
+                enemy.action_timer = fuse_seconds;
+                self.sfx_events.push(SfxEvent::MineArm);
+            }
+        }
+
+        for enemy in &mut self.enemies {
+            if enemy.kind == EnemyKind::VaporMine && enemy.armed {
+                enemy.armed_age += TICK_SECONDS;
+                enemy.action_timer -= TICK_SECONDS;
+            }
+        }
+
+        let old_enemies = mem::take(&mut self.enemies);
+        let mut detonations = Vec::new();
+        for enemy in old_enemies {
+            if enemy.kind == EnemyKind::VaporMine && enemy.armed && enemy.action_timer <= 0.0 {
+                detonations.push(enemy);
+            } else {
+                self.enemies.push(enemy);
+            }
+        }
+        for mine in detonations {
+            self.detonate_vapor_mine(mine);
+        }
+    }
+
+    fn detonate_vapor_mine(&mut self, mine: Enemy) {
+        let radius = overdrive_lerp(60.0, 110.0, self.difficulty.overdrive);
+        self.sfx_events.push(SfxEvent::MineBlast);
+        self.mine_blasts.push(MineBlastVisual {
+            position: mine.position,
+            radius,
+            age: 0.0,
+        });
+        self.spawn_enemy_shatter(&mine, 0.48, 190.0);
+        self.spawn_shrapnel(mine.position);
+        self.apply_mine_blast(mine.position, radius);
+    }
+
+    fn apply_mine_blast(&mut self, center: Vec2, radius: f32) {
+        let player_hit = self.player.position.distance(center) <= radius + SHIP_RADIUS;
+        let old_enemies = mem::take(&mut self.enemies);
+        for mut enemy in old_enemies {
+            if enemy.position.distance(center) > radius + enemy.kind.radius() {
+                self.enemies.push(enemy);
+                continue;
+            }
+            match enemy.kind {
+                EnemyKind::PhotonMine => {
+                    self.sfx_events.push(SfxEvent::MinePop);
+                    self.spawn_enemy_shatter(&enemy, 0.9, 115.0);
+                    self.award_points(enemy.kind.points());
+                }
+                EnemyKind::VaporMine => {
+                    let newly_armed = !enemy.armed;
+                    enemy.armed = true;
+                    enemy.armed_age = 0.0;
+                    enemy.action_timer = self
+                        .rng
+                        .range_f32(MINE_CHAIN_FUSE_MIN_SECONDS, MINE_CHAIN_FUSE_MAX_SECONDS);
+                    if newly_armed {
+                        self.sfx_events.push(SfxEvent::MineArm);
+                    }
+                    self.enemies.push(enemy);
+                }
+                EnemyKind::Droid | EnemyKind::Command | EnemyKind::Death => {
+                    self.sfx_events.push(SfxEvent::EnemyExplode);
+                    self.spawn_enemy_shatter(&enemy, 0.9, 115.0);
+                    self.award_points(enemy.kind.points());
+                }
+            }
+        }
+        if player_hit {
+            self.kill_player();
+        }
+    }
+
+    fn spawn_shrapnel(&mut self, center: Vec2) {
+        let overdrive = self.difficulty.overdrive;
+        if overdrive < 0.3 {
+            return;
+        }
+        let progress = ((overdrive - 0.3) / 0.7).clamp(0.0, 1.0);
+        let count = overdrive_lerp(3.0, 6.0, progress).round() as usize;
+        let offset = self.rng.range_f32(0.0, TAU);
+        for index in 0..count {
+            let angle = offset + TAU * index as f32 / count as f32;
+            self.enemy_bullets.push(EnemyBullet {
+                position: center,
+                velocity: direction(angle) * self.rng.range_f32(230.0, 300.0),
+                ttl: Some(SHRAPNEL_LIFETIME_SECONDS),
+            });
+        }
+    }
+
+    fn update_mine_blast_visuals(&mut self) {
+        for blast in &mut self.mine_blasts {
+            blast.age += TICK_SECONDS;
+        }
+        self.mine_blasts
+            .retain(|blast| blast.age < MINE_BLAST_VISUAL_SECONDS);
     }
 
     fn handle_combat(&mut self) {
@@ -968,6 +1215,9 @@ impl Simulation {
         self.wave_age = 0.0;
         self.next_escalation = self.difficulty.escalation_first_seconds;
         self.mine_drop_timer = 3.4;
+        if self.difficulty.overdrive > 0.0 {
+            self.droid_fire_timer = self.random_droid_fire_interval() + 2.0;
+        }
         self.lone_timer = LONE_PROMOTION_SECONDS;
         self.last_ship_count = count;
         self.convoy_tick_timer = 0.0;
@@ -1054,11 +1304,22 @@ fn approach(current: f32, target: f32, maximum_change: f32) -> f32 {
     current + (target - current).clamp(-maximum_change, maximum_change)
 }
 
+fn overdrive_lerp(start: f32, end: f32, overdrive: f32) -> f32 {
+    if overdrive <= 0.0 {
+        start
+    } else if overdrive >= 1.0 {
+        end
+    } else {
+        start + (end - start) * overdrive
+    }
+}
+
 fn resolve_circle_arena(
     position: &mut Vec2,
     velocity: &mut Vec2,
     radius: f32,
     border_flash: &mut [f32; 8],
+    restitution: f32,
 ) -> bool {
     let mut bounced = false;
     if resolve_axis_wall(
@@ -1067,6 +1328,7 @@ fn resolve_circle_arena(
         true,
         velocity,
         vec2(1.0, 0.0),
+        restitution,
     ) {
         flash_border_edge(border_flash, OUTER_LEFT_EDGE);
         bounced = true;
@@ -1077,6 +1339,7 @@ fn resolve_circle_arena(
         false,
         velocity,
         vec2(-1.0, 0.0),
+        restitution,
     ) {
         flash_border_edge(border_flash, OUTER_RIGHT_EDGE);
         bounced = true;
@@ -1087,6 +1350,7 @@ fn resolve_circle_arena(
         true,
         velocity,
         vec2(0.0, 1.0),
+        restitution,
     ) {
         flash_border_edge(border_flash, OUTER_TOP_EDGE);
         bounced = true;
@@ -1097,6 +1361,7 @@ fn resolve_circle_arena(
         false,
         velocity,
         vec2(0.0, -1.0),
+        restitution,
     ) {
         flash_border_edge(border_flash, OUTER_BOTTOM_EDGE);
         bounced = true;
@@ -1130,7 +1395,7 @@ fn resolve_circle_arena(
         };
         *position = corrected_position;
         if velocity.dot(normal) < 0.0 {
-            *velocity = reflect_velocity(*velocity, normal, RESTITUTION);
+            *velocity = reflect_velocity(*velocity, normal, restitution);
             flash_border_edge(border_flash, edge);
             bounced = true;
         }
@@ -1144,6 +1409,7 @@ fn resolve_axis_wall(
     is_minimum: bool,
     velocity: &mut Vec2,
     inward_normal: Vec2,
+    restitution: f32,
 ) -> bool {
     let crossed = if is_minimum {
         *coordinate < limit
@@ -1153,7 +1419,7 @@ fn resolve_axis_wall(
     if crossed {
         *coordinate = limit;
         if velocity.dot(inward_normal) < 0.0 {
-            *velocity = reflect_velocity(*velocity, inward_normal, RESTITUTION);
+            *velocity = reflect_velocity(*velocity, inward_normal, restitution);
             return true;
         }
     }
@@ -1313,8 +1579,8 @@ mod tests {
     use macroquad::math::vec2;
 
     use super::{
-        reflect_velocity, Enemy, EnemyKind, GameState, InputState, PlayPhase, SfxEvent, Shot,
-        Simulation, TICK_SECONDS,
+        circle_fits_track, reflect_velocity, Enemy, EnemyBullet, EnemyKind, GameState, InputState,
+        PlayPhase, SfxEvent, Shot, Simulation, TICK_SECONDS,
     };
     use crate::enemies::MINE_CAP;
 
@@ -1479,6 +1745,253 @@ mod tests {
 
         simulation.promote_to_command(0);
         assert!((0.9..=1.6).contains(&simulation.enemies[0].action_timer));
+    }
+
+    #[test]
+    fn wave_thirteen_keeps_every_overdrive_mechanic_and_rng_draw_inert() {
+        let mut simulation = Simulation::new_at_wave(0x1313, 13);
+        simulation.play_phase = PlayPhase::Active;
+        simulation.next_escalation = f32::MAX;
+        simulation.mine_drop_timer = f32::MAX;
+        simulation.player.position = vec2(512.0, 560.0);
+        simulation
+            .enemies
+            .push(Enemy::mine(EnemyKind::VaporMine, vec2(512.0, 540.0), 0.0));
+        let rng_before = simulation.rng;
+
+        for _ in 0..300 {
+            simulation.tick(InputState::default());
+            let events = simulation.drain_sfx_events();
+            assert!(!events.contains(&SfxEvent::MineArm));
+            assert!(!events.contains(&SfxEvent::MineBlast));
+            assert_eq!(simulation.state, GameState::Playing);
+        }
+
+        let vapor = simulation
+            .enemies
+            .iter()
+            .find(|enemy| enemy.kind == EnemyKind::VaporMine)
+            .expect("the inert vapor mine persists");
+        assert!(!vapor.armed);
+        assert_eq!(vapor.velocity, vec2(0.0, 0.0));
+        assert!(simulation.enemy_bullets.is_empty());
+        assert!(simulation.mine_blasts.is_empty());
+        assert_eq!(simulation.rng, rng_before);
+    }
+
+    #[test]
+    fn overdrive_vapor_mine_arms_blasts_chains_and_scores_ship_kills() {
+        let mut simulation = Simulation::new_at_wave(0x1414, 14);
+        simulation.play_phase = PlayPhase::Active;
+        simulation.next_escalation = f32::MAX;
+        simulation.mine_drop_timer = f32::MAX;
+        simulation.droid_fire_timer = f32::MAX;
+        simulation.enemies.clear();
+        simulation.player.position = vec2(190.0, 200.0);
+        simulation
+            .enemies
+            .push(Enemy::mine(EnemyKind::VaporMine, vec2(120.0, 200.0), 0.0));
+        simulation
+            .enemies
+            .push(Enemy::mine(EnemyKind::VaporMine, vec2(60.0, 200.0), 0.0));
+        let mut command = Enemy::droid(0.0, 0.0, 1.0, 205.0);
+        command.kind = EnemyKind::Command;
+        command.position = vec2(120.0, 250.0);
+        command.velocity = vec2(190.0, 0.0);
+        command.action_timer = f32::MAX;
+        command.mine_timer = f32::MAX;
+        simulation.enemies.push(command);
+
+        simulation.tick(InputState::default());
+        assert!(simulation.drain_sfx_events().contains(&SfxEvent::MineArm));
+        let source = simulation
+            .enemies
+            .iter_mut()
+            .find(|enemy| {
+                enemy.kind == EnemyKind::VaporMine
+                    && enemy.position.distance(vec2(120.0, 200.0)) < 1.0
+            })
+            .expect("the proximity mine armed");
+        assert!(source.armed);
+        source.action_timer = 0.0;
+
+        simulation.tick(InputState::default());
+        let events = simulation.drain_sfx_events();
+        assert!(events.contains(&SfxEvent::MineBlast));
+        assert!(events.contains(&SfxEvent::MineArm));
+        assert_eq!(simulation.state, GameState::ShipDeath);
+        assert_eq!(simulation.score, EnemyKind::Command.points());
+        assert!(!simulation.enemies.iter().any(|enemy| enemy.kind.is_ship()));
+        let chained = simulation
+            .enemies
+            .iter()
+            .find(|enemy| enemy.kind == EnemyKind::VaporMine)
+            .expect("the nearby vapor mine survives and chain-arms");
+        assert!(chained.armed);
+        assert!(
+            (super::MINE_CHAIN_FUSE_MIN_SECONDS..=super::MINE_CHAIN_FUSE_MAX_SECONDS)
+                .contains(&chained.action_timer)
+        );
+    }
+
+    #[test]
+    fn armed_vapor_mines_defuse_normally_and_freeze_during_ship_death() {
+        let mut defuse = Simulation::new_at_wave(0xDEF0, 25);
+        defuse.play_phase = PlayPhase::Active;
+        defuse.enemies.clear();
+        let mut mine = Enemy::mine(EnemyKind::VaporMine, vec2(100.0, 100.0), 0.0);
+        mine.armed = true;
+        mine.action_timer = 0.5;
+        defuse.enemies.push(mine);
+        defuse.shots.push(Shot {
+            position: vec2(105.0, 100.0),
+            velocity: vec2(600.0, 0.0),
+        });
+        defuse.handle_combat();
+        assert_eq!(defuse.score, EnemyKind::VaporMine.points());
+        assert!(defuse.enemies.is_empty());
+        let events = defuse.drain_sfx_events();
+        assert!(events.contains(&SfxEvent::MinePop));
+        assert!(!events.contains(&SfxEvent::MineBlast));
+
+        let mut frozen = Simulation::new_at_wave(0xF0EE, 25);
+        frozen.state = GameState::ShipDeath;
+        frozen.play_phase = PlayPhase::Active;
+        frozen.death_timer = 10.0;
+        frozen.mine_drop_timer = f32::MAX;
+        frozen.next_escalation = f32::MAX;
+        frozen.enemies.clear();
+        let mut armed = Enemy::mine(EnemyKind::VaporMine, vec2(100.0, 100.0), 0.0);
+        armed.armed = true;
+        armed.action_timer = 0.5;
+        frozen.enemies.push(armed);
+        frozen
+            .enemies
+            .push(Enemy::droid(0.0, 0.0, 1.0, frozen.difficulty.convoy_speed));
+        frozen.tick(InputState::default());
+        let armed = frozen
+            .enemies
+            .iter()
+            .find(|enemy| enemy.kind == EnemyKind::VaporMine)
+            .expect("the armed mine persists while the player is dead");
+        assert_eq!(armed.action_timer, 0.5);
+        assert_eq!(armed.armed_age, 0.0);
+    }
+
+    #[test]
+    fn overdrive_vapor_mine_drift_reflects_and_stays_in_the_track() {
+        let mut simulation = Simulation::new_at_wave(0x2525, 25);
+        simulation.enemies.clear();
+        assert!(simulation.try_spawn_mine(EnemyKind::VaporMine, vec2(100.0, 100.0), 0.0,));
+        assert!(simulation.enemies[0].velocity.length() > 0.0);
+
+        for _ in 0..5_000 {
+            simulation.update_enemies();
+            let mine = &simulation.enemies[0];
+            assert!(circle_fits_track(mine.position, mine.kind.radius()));
+        }
+    }
+
+    #[test]
+    fn overdrive_shrapnel_has_the_scaled_count_ttl_and_wall_fizzle() {
+        for (wave, expected) in [(17, 3), (25, 6)] {
+            let mut simulation = Simulation::new_at_wave(0x5100 + wave as u64, wave);
+            simulation.enemy_bullets.clear();
+            simulation.spawn_shrapnel(vec2(100.0, 100.0));
+            assert_eq!(simulation.enemy_bullets.len(), expected);
+            assert!(simulation
+                .enemy_bullets
+                .iter()
+                .all(|bullet| bullet.ttl == Some(super::SHRAPNEL_LIFETIME_SECONDS)));
+            for _ in 0..60 {
+                simulation.update_enemy_bullets();
+            }
+            assert!(simulation.enemy_bullets.is_empty());
+        }
+
+        let mut simulation = Simulation::new_at_wave(0x5151, 25);
+        simulation.enemy_bullets.clear();
+        simulation.enemy_bullets.push(EnemyBullet {
+            position: vec2(super::OUTER_LEFT + 1.0, 100.0),
+            velocity: vec2(-230.0, 0.0),
+            ttl: Some(super::SHRAPNEL_LIFETIME_SECONDS),
+        });
+        simulation.update_enemy_bullets();
+        assert!(simulation.enemy_bullets.is_empty());
+        assert!(simulation
+            .drain_sfx_events()
+            .contains(&SfxEvent::BulletFizzle));
+    }
+
+    #[test]
+    fn droids_only_return_fire_in_overdrive() {
+        let mut wave_thirteen = Simulation::new_at_wave(0xD013, 13);
+        wave_thirteen.play_phase = PlayPhase::Active;
+        wave_thirteen.droid_fire_timer = 0.0;
+        let rng_before = wave_thirteen.rng;
+        wave_thirteen.update_droid_fire();
+        assert!(wave_thirteen.enemy_bullets.is_empty());
+        assert_eq!(wave_thirteen.rng, rng_before);
+
+        let mut wave_twenty_five = Simulation::new_at_wave(0xD025, 25);
+        wave_twenty_five.play_phase = PlayPhase::Active;
+        wave_twenty_five.droid_fire_timer = 0.0;
+        wave_twenty_five.update_droid_fire();
+        assert_eq!(wave_twenty_five.enemy_bullets.len(), 1);
+        let bullet = wave_twenty_five.enemy_bullets[0];
+        assert_eq!(bullet.ttl, None);
+        assert!(
+            (bullet.velocity.length()
+                - wave_twenty_five.difficulty.enemy_bullet_speed * super::DROID_BULLET_SPEED_SCALE)
+                .abs()
+                < 0.001
+        );
+    }
+
+    #[test]
+    fn practice_runs_never_replace_the_stored_high_score() {
+        let mut simulation = Simulation::new(0xCAFE);
+        let original_high_score = simulation.high_score;
+        simulation.practice_wave = 25;
+        simulation.start_game();
+        assert!(simulation.practice_run);
+        simulation.score = original_high_score + 10_000;
+        simulation.enter_game_over();
+        assert_eq!(simulation.high_score, original_high_score);
+        assert!(!simulation.new_high_score);
+
+        simulation.enter_attract();
+        simulation.practice_wave = 1;
+        simulation.start_game();
+        assert!(!simulation.practice_run);
+        simulation.score = original_high_score + 1;
+        simulation.enter_game_over();
+        assert_eq!(simulation.high_score, original_high_score + 1);
+        assert!(simulation.new_high_score);
+    }
+
+    #[test]
+    fn attract_wave_select_cycles_and_start_honours_the_selection() {
+        let mut simulation = Simulation::new(0xBEEF);
+        for expected in [14, 17, 21, 25, 1] {
+            simulation.tick(InputState {
+                wave_select: true,
+                ..InputState::default()
+            });
+            assert_eq!(simulation.practice_wave, expected);
+            simulation.tick(InputState::default());
+        }
+        simulation.tick(InputState {
+            wave_select: true,
+            ..InputState::default()
+        });
+        simulation.tick(InputState::default());
+        simulation.tick(InputState {
+            start: true,
+            ..InputState::default()
+        });
+        assert_eq!(simulation.wave, 14);
+        assert!(simulation.practice_run);
     }
 
     #[test]
